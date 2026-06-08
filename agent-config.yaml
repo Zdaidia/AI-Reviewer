@@ -1,0 +1,153 @@
+# Dev Quality Inspector AI Agent Configuration
+
+agent:
+  name: "Dev Quality Inspector AI Agent"
+  version: "2.0.0"
+  description: "Autonomous code quality analysis and fix Agent"
+
+capabilities:
+  - code_analysis
+  - automated_fixing
+  - test_generation
+  - project_running
+  - dependency_management
+
+behavior:
+  max_iterations: 10
+  auto_confirm_safe_actions: false
+  require_approval_for:
+    - file_deletion
+    - project_running
+    - expensive_operations
+  learning_enabled: true
+
+tools:
+  - name: scanner
+    enabled: true
+    auto_run: true
+    description: "Scan code files and directories for quality issues"
+
+  - name: fixer
+    enabled: true
+    auto_run: false
+    requires_approval: true
+    description: "Fix code issues using rule-based or AI-powered methods"
+
+  - name: tester
+    enabled: true
+    auto_run: false
+    requires_approval: false
+    description: "Generate and run tests"
+
+  - name: runner
+    enabled: true
+    auto_run: false
+    requires_approval: true
+    description: "Execute projects (Node.js, React, Vue, Angular, Flutter)"
+
+  - name: file
+    enabled: true
+    auto_run: false
+    requires_approval: true
+    description: "File system operations (read, write, search, delete)"
+
+# LLM Configuration
+llm:
+  # Default model to use
+  default_model: "gpt-3.5-turbo"
+
+  # High quality model for complex tasks
+  high_quality_model: "gpt-4-turbo"
+
+  # Fast model for simple tasks
+  fast_model: "gpt-3.5-turbo"
+
+  # Provider configuration
+  providers:
+    openai:
+      enabled: true
+      api_key_env: "OPENAI_API_KEY"
+      base_url: null
+      models:
+        - "gpt-4-turbo"
+        - "gpt-4"
+        - "gpt-3.5-turbo"
+
+    anthropic:
+      enabled: true
+      api_key_env: "ANTHROPIC_API_KEY"
+      base_url: null
+      models:
+        - "claude-3-opus"
+        - "claude-3-sonnet"
+        - "claude-3-haiku"
+
+    ollama:
+      enabled: false
+      base_url: "http://localhost:11434"
+      models:
+        - "codellama"
+        - "llama2"
+
+  # Routing preferences
+  routing:
+    prefer_local: false
+    cost_sensitive: false
+    speed_sensitive: false
+
+# Memory Configuration
+memory:
+  # Episodic memory (execution history)
+  episodic:
+    max_episodes: 1000
+    persist_to_file: true
+    storage_path: ".agent-memory/episodes.json"
+
+  # Semantic memory (knowledge base)
+  semantic:
+    max_entries: 5000
+    persist_to_file: true
+    storage_path: ".agent-memory/semantic.json"
+
+  # Working memory (current context)
+  working:
+    max_context_items: 100
+
+# Planning Configuration
+planning:
+  # How many similar past tasks to consider
+  similarity_lookup_count: 5
+
+  # Minimum similarity threshold for considering past tasks
+  similarity_threshold: 0.3
+
+  # Whether to use LLM for planning (vs rule-based)
+  use_llm_planning: true
+
+# Task Execution
+execution:
+  # Maximum number of retries for failed tasks
+  max_retries: 2
+
+  # Delay between retries (ms)
+  retry_delay: 1000
+
+  # Timeout for individual tasks (ms)
+  task_timeout: 300000
+
+  # Whether to continue on non-critical errors
+  continue_on_error: true
+
+# UI Configuration
+ui:
+  # Show thinking process in chat
+  show_thinking: true
+
+  # Show execution progress
+  show_progress: true
+
+  # Maximum number of chat messages to display
+  max_chat_messages: 100
+
+  # Refresh interval for status updates (ms)
+  status_refresh_interval: 500

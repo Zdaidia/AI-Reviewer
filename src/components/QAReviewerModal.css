@@ -1,0 +1,843 @@
+/* QA Reviewer Modal Styles */
+
+.qa-reviewer-modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.qa-reviewer-modal {
+  background: #1e1e1e;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 800px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+/* Header */
+.qa-reviewer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 24px;
+  border-bottom: 1px solid #333;
+}
+
+.qa-reviewer-title h2 {
+  margin: 0;
+  font-size: 20px;
+  color: #fff;
+}
+
+.qa-reviewer-subtitle {
+  margin: 4px 0 0 0;
+  font-size: 13px;
+  color: #888;
+}
+
+.qa-reviewer-close {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.qa-reviewer-close:hover {
+  background: #333;
+  color: #fff;
+}
+
+/* Tabs */
+.qa-reviewer-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 24px;
+  border-bottom: 1px solid #333;
+}
+
+.qa-reviewer-tab {
+  background: none;
+  border: none;
+  padding: 12px 20px;
+  color: #888;
+  font-size: 14px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.qa-reviewer-tab:hover {
+  color: #bbb;
+}
+
+.qa-reviewer-tab.active {
+  color: #4f9eff;
+  border-bottom-color: #4f9eff;
+}
+
+.qa-reviewer-tab:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Content */
+.qa-reviewer-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  pointer-events: auto;
+}
+
+.qa-reviewer-section {
+  margin-bottom: 24px;
+}
+
+.qa-reviewer-section h3 {
+  margin: 0 0 12px 0;
+  font-size: 15px;
+  color: #ddd;
+}
+
+/* Input Groups */
+.qa-reviewer-input-group {
+  background: #252525;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.qa-reviewer-input-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.qa-reviewer-or {
+  color: #666;
+  font-size: 13px;
+}
+
+.qa-reviewer-file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #333;
+  border-radius: 6px;
+  font-size: 13px;
+  color: #aaa;
+}
+
+.qa-reviewer-clear {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: #e74c3c;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.qa-reviewer-clear:hover {
+  text-decoration: underline;
+}
+
+.qa-reviewer-textarea {
+  width: 100%;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 12px;
+  color: #ddd;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  caret-color: #4f9eff;
+}
+
+.qa-reviewer-textarea:focus {
+  outline: none;
+  border-color: #4f9eff;
+}
+
+.qa-reviewer-input {
+  flex: 1;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: #ddd;
+  font-size: 13px;
+  caret-color: #4f9eff;
+}
+
+.qa-reviewer-input:focus {
+  outline: none;
+  border-color: #4f9eff;
+}
+
+/* UI Preview */
+.qa-reviewer-ui-preview {
+  margin-top: 12px;
+  position: relative;
+  display: inline-block;
+}
+
+.qa-reviewer-ui-preview img {
+  max-width: 200px;
+  max-height: 150px;
+  border-radius: 8px;
+  border: 1px solid #333;
+}
+
+/* Dimensions */
+.qa-reviewer-dimensions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
+.qa-reviewer-dimension {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: #252525;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.qa-reviewer-dimension:hover {
+  background: #333;
+}
+
+.qa-reviewer-dimension input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.qa-reviewer-dimension span {
+  font-size: 13px;
+  color: #bbb;
+}
+
+/* Form */
+.qa-reviewer-form-group {
+  margin-bottom: 16px;
+}
+
+.qa-reviewer-form-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #aaa;
+}
+
+.qa-reviewer-select {
+  width: 100%;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: #ddd;
+  font-size: 13px;
+}
+
+.qa-reviewer-select:focus {
+  outline: none;
+  border-color: #4f9eff;
+}
+
+.qa-reviewer-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0;
+  font-size: 13px;
+  color: #bbb;
+  cursor: pointer;
+}
+
+.qa-reviewer-checkbox input {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+/* Buttons */
+.qa-reviewer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 16px;
+  border-top: 1px solid #333;
+}
+
+.qa-reviewer-btn {
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+  border: none;
+}
+
+.qa-reviewer-btn-primary {
+  background: #4f9eff;
+  color: #fff;
+}
+
+.qa-reviewer-btn-primary:hover:not(:disabled) {
+  background: #3a8eef;
+}
+
+.qa-reviewer-btn-secondary {
+  background: #444;
+  color: #ddd;
+}
+
+.qa-reviewer-btn-secondary:hover {
+  background: #555;
+}
+
+.qa-reviewer-btn-success {
+  background: #27ae60;
+  color: #fff;
+}
+
+.qa-reviewer-btn-success:hover:not(:disabled) {
+  background: #229954;
+}
+
+.qa-reviewer-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Summary */
+.qa-reviewer-summary {
+  background: #252525;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.qa-reviewer-summary-stats {
+  display: flex;
+  gap: 24px;
+}
+
+.qa-reviewer-stat {
+  text-align: center;
+}
+
+.qa-reviewer-stat-value {
+  display: block;
+  font-size: 24px;
+  font-weight: bold;
+  color: #4f9eff;
+}
+
+.qa-reviewer-stat-label {
+  font-size: 12px;
+  color: #888;
+}
+
+/* Segments List */
+.qa-reviewer-segments-list {
+  background: #252525;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.qa-reviewer-segment-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: #333;
+  border-radius: 6px;
+  margin-bottom: 8px;
+}
+
+.qa-reviewer-segment-index {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #444;
+  border-radius: 50%;
+  font-size: 12px;
+  color: #aaa;
+}
+
+.qa-reviewer-segment-name {
+  flex: 1;
+  font-size: 13px;
+  color: #ddd;
+}
+
+.qa-reviewer-segment-files {
+  font-size: 12px;
+  color: #888;
+}
+
+.qa-reviewer-segment-status {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+}
+
+.qa-reviewer-segment-status.status-pending {
+  background: #555;
+  color: #aaa;
+}
+
+.qa-reviewer-segment-status.status-running {
+  background: #f39c12;
+  color: #fff;
+}
+
+.qa-reviewer-segment-status.status-completed {
+  background: #27ae60;
+  color: #fff;
+}
+
+.qa-reviewer-segment-status.status-failed {
+  background: #e74c3c;
+  color: #fff;
+}
+
+/* Progress */
+.qa-reviewer-progress-section {
+  background: #252525;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.qa-reviewer-progress-bar {
+  height: 8px;
+  background: #333;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.qa-reviewer-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #4f9eff, #27ae60);
+  transition: width 0.3s ease;
+}
+
+.qa-reviewer-progress-fill.qa-reviewer-progress-warning {
+  background: linear-gradient(90deg, #f39c12, #e67e22);
+}
+
+.qa-reviewer-progress-fill.qa-reviewer-progress-success {
+  background: linear-gradient(90deg, #22c55e, #16a34a);
+}
+
+.qa-reviewer-rate-limit-hint {
+  color: #f39c12;
+  font-weight: 500;
+}
+
+.qa-reviewer-progress-message {
+  margin: 0;
+  font-size: 13px;
+  color: #aaa;
+}
+
+/* Scrollbar */
+.qa-reviewer-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.qa-reviewer-content::-webkit-scrollbar-track {
+  background: #1a1a1a;
+}
+
+.qa-reviewer-content::-webkit-scrollbar-thumb {
+  background: #444;
+  border-radius: 4px;
+}
+
+.qa-reviewer-content::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
+
+/* Files Tab Styles */
+.qa-reviewer-files-section {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.qa-reviewer-module-extraction {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.qa-reviewer-hint {
+  font-size: 12px;
+  color: #888;
+  margin: 0;
+}
+
+.qa-reviewer-modules-list {
+  margin-top: 16px;
+}
+
+.qa-reviewer-modules-title {
+  font-size: 13px;
+  color: #aaa;
+  margin-bottom: 8px;
+}
+
+.qa-reviewer-modules-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.qa-reviewer-module-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: #333;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.qa-reviewer-module-checkbox:hover {
+  background: #444;
+}
+
+.qa-reviewer-module-checkbox input {
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+
+.qa-reviewer-module-checkbox span {
+  font-size: 13px;
+  color: #bbb;
+}
+
+.qa-reviewer-empty-state {
+  text-align: center;
+  padding: 40px 20px;
+  background: #252525;
+  border-radius: 8px;
+}
+
+.qa-reviewer-empty-state p {
+  color: #888;
+  margin: 0 0 16px 0;
+}
+
+.qa-reviewer-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.qa-reviewer-files-list {
+  max-height: 300px;
+  overflow-y: auto;
+  background: #252525;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.qa-reviewer-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #333;
+  border-radius: 6px;
+  margin-bottom: 6px;
+  text-align: left;
+}
+
+.qa-reviewer-file-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.qa-reviewer-file-name {
+  font-size: 13px;
+  color: #ddd;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qa-reviewer-file-path {
+  font-size: 11px;
+  color: #666;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+
+.qa-reviewer-file-path:hover {
+  color: #999;
+}
+
+.qa-reviewer-file-remove {
+  background: none;
+  border: none;
+  color: #e74c3c;
+  cursor: pointer;
+  padding: 4px;
+  font-size: 14px;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+
+.qa-reviewer-file-remove:hover {
+  opacity: 1;
+}
+
+/* Preview Tab Styles */
+.qa-reviewer-requirement-preview {
+  background: #252525;
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.qa-reviewer-requirement-text {
+  color: #ddd;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.qa-reviewer-empty-text {
+  color: #888;
+  font-style: italic;
+}
+
+.qa-reviewer-files-preview {
+  background: #252525;
+  border-radius: 8px;
+  padding: 16px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.qa-reviewer-files-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 8px;
+}
+
+.qa-reviewer-file-item-small {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: #333;
+  border-radius: 4px;
+}
+
+.qa-reviewer-file-icon {
+  font-size: 14px;
+}
+
+.qa-reviewer-file-name-small {
+  font-size: 12px;
+  color: #ddd;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qa-reviewer-more-files {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: #888;
+  font-size: 12px;
+  padding: 8px;
+}
+
+.qa-reviewer-files-note {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: #f39c12;
+  font-size: 12px;
+  padding: 8px;
+  background: rgba(243, 156, 18, 0.1);
+  border-radius: 4px;
+}
+
+/* ============================================================
+   P2: 三维对齐结果可视化样式
+   ============================================================ */
+
+.three-dimensional-results {
+  margin: 20px 0;
+  padding: 16px;
+  background: rgba(30, 30, 30, 0.8);
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.three-dimensional-results h4 {
+  margin: 0 0 16px 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 三维对齐卡片基础样式 */
+.three-dimensional-results > div > div {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.three-dimensional-results > div > div:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* 需求匹配维度 - 蓝色主题 */
+.three-dimensional-results .dimension-requirement {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.15) 0%, rgba(37, 99, 235, 0.1) 100%);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.three-dimensional-results .dimension-requirement.passed {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.15) 0%, rgba(22, 163, 74, 0.1) 100%);
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+.three-dimensional-results .dimension-requirement.failed {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.15) 0%, rgba(220, 38, 38, 0.1) 100%);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+/* 契约检查维度 - 黄色主题 */
+.three-dimensional-results .dimension-contract {
+  background: linear-gradient(135deg, rgba(234, 179, 8, 0.15) 0%, rgba(202, 138, 4, 0.1) 100%);
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.three-dimensional-results .dimension-contract.passed {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.15) 0%, rgba(22, 163, 74, 0.1) 100%);
+  border-color: rgba(34, 197, 94, 0.4);
+}
+
+/* 优化建议维度 - 紫色主题 */
+.three-dimensional-results .dimension-optimization {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.15) 0%, rgba(147, 51, 234, 0.1) 100%);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+}
+
+/* 状态指示器 */
+.three-dimensional-results .status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.three-dimensional-results .status-badge.passed {
+  background: rgba(34, 197, 94, 0.2);
+  color: #22c55e;
+}
+
+.three-dimensional-results .status-badge.failed {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+.three-dimensional-results .status-badge.partial {
+  background: rgba(234, 179, 8, 0.2);
+  color: #eab308;
+}
+
+/* 详情列表 */
+.three-dimensional-results .detail-list {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.three-dimensional-results .detail-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 12px;
+  color: #d1d5db;
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+.three-dimensional-results .detail-item:last-child {
+  margin-bottom: 0;
+}
+
+/* 进度条样式 */
+.three-dimensional-results .progress-bar {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.three-dimensional-results .progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6 0%, #8b5cf6 100%);
+  transition: width 0.3s ease;
+}
+
+/* 统计数字样式 */
+.three-dimensional-results .stat-number {
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.three-dimensional-results .stat-label {
+  font-size: 12px;
+  color: #9ca3af;
+  margin-top: 4px;
+}

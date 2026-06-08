@@ -1,0 +1,298 @@
+# Dev Quality Inspector - Code Rules Configuration
+#
+# 规则格式:
+# - id: 规则唯一标识
+#   name: 规则名称
+#   severity: error | warning | info
+#   languages: 适用语言
+#   pattern: 正则表达式或 AST 匹配模式
+#   message: 违规提示信息
+#   suggestion: 修改建议
+#   autoFix: 是否支持自动修复
+
+# JavaScript/TypeScript 规则
+- id: JS-001
+  name: No console.log in production
+  severity: warning
+  languages: [javascript, typescript]
+  pattern: "console\\.log\\("
+  message: "Console.log statement found"
+  suggestion: "Remove console.log or replace with proper logging library"
+  autoFix: true
+
+- id: JS-002
+  name: No var declarations
+  severity: error
+  languages: [javascript, typescript]
+  pattern: "\\bvar\\s+[a-zA-Z_$]"
+  message: "Var declaration found"
+  suggestion: "Use 'let' or 'const' instead of 'var'"
+  autoFix: true
+
+# JS 空值检查规则（上下文分析）
+- id: JS-NULL-001
+  name: Optional chaining missing (context-aware)
+  severity: warning
+  languages: [javascript, typescript]
+  # 已改为上下文分析检测 - 由 analyzeJSOptionalChain() 方法实现
+  # 检测逻辑：识别变量定义（可能为 null/undefined），追踪属性访问，检查是否有 ?. 保护
+  # pattern 仅用于文档说明，实际检测由 scanner/index.js 实现
+  pattern: "N/A - context-aware detection"
+  message: "属性访问缺少可选链保护，变量可能为 null/undefined"
+  suggestion: "使用可选链 ?. 进行安全的属性访问：obj?.property"
+  autoFix: false
+
+- id: JS-NULL-002
+  name: Array method result missing null check (context-aware)
+  severity: warning
+  languages: [javascript, typescript]
+  # 已改为上下文分析检测 - 由 analyzeJSFindResult() 方法实现
+  # 检测逻辑：识别 find/filter/findIndex 等 Array 方法调用，追踪返回值使用，检查是否有空值保护
+  # pattern 仅用于文档说明，实际检测由 scanner/index.js 实现
+  pattern: "N/A - context-aware detection"
+  message: "Array.find() 等方法可能返回 undefined，缺少空值检查"
+  suggestion: "使用空值保护：if (result) { ... } 或 result?.property 或 result ?? defaultValue"
+  autoFix: false
+
+# JS-003 已禁用 - 正则表达式可能导致性能问题
+# - id: JS-003
+#   name: Missing error handling in async functions
+#   severity: error
+#   languages: [javascript, typescript]
+#   pattern: "await\\s+[^;]+\\n(?!\\s*\\/\\/\\s*TODO|[\\s\\S]*?try)"
+#   message: "Async call without error handling"
+#   suggestion: "Wrap async calls in try-catch block"
+#   autoFix: false
+
+# JS-004 已禁用 - 正则表达式可能导致性能问题
+# - id: JS-004
+#   name: Missing React key in list
+#   severity: error
+#   languages: [javascript, typescript, jsx, tsx]
+#   pattern: "\\.map\\([^)]+\\)\\s*=>\\s*<[^>]+>[^<]*<"
+#   message: "Missing 'key' prop in list rendering"
+#   suggestion: "Add unique 'key' prop to elements in list"
+#   autoFix: false
+
+# TS-001 已禁用 - 不准确，会误报 void 函数和 Widget 类型
+# - id: TS-001
+#   name: Missing type annotation
+#   severity: warning
+#   languages: [typescript]
+#   pattern: "function\\s+[a-zA-Z_$][a-zA-Z0-9_$]*\\s*\\([^)]*\\)\\s*:[^ {]"
+#   message: "Function missing return type annotation"
+#   suggestion: "Add return type annotation to function"
+#   autoFix: false
+
+- id: TS-002
+  name: Any type usage
+  severity: warning
+  languages: [typescript]
+  pattern: ":\\s*any\\b"
+  message: "Using 'any' type"
+  suggestion: "Use specific types instead of 'any'"
+  autoFix: false
+
+# Vue 规则
+# VUE-001 已禁用 - 正则表达式可能导致性能问题
+# - id: VUE-001
+#   name: Missing v-key in v-for
+#   severity: error
+#   languages: [vue]
+#   pattern: "v-for=[\"'][^\"']+[\"']([^>]*)(?!.*v-key)"
+#   message: "v-for without :key binding"
+#   suggestion: "Add :key attribute to v-for directive"
+#   autoFix: false
+
+# VUE-002 已禁用 - 数组形式的 props 在简单情况下是有效的
+# - id: VUE-002
+#   name: Missing prop validation
+#   severity: warning
+#   languages: [vue]
+#   pattern: "props:\\s*\\[[^\\]]+\\]"
+#   message: "Props defined as array (should use object with validation)"
+#   suggestion: "Define props as object with type and validation"
+#   autoFix: false
+
+- id: VUE-003
+  name: Console statement in template
+  severity: warning
+  languages: [vue]
+  pattern: "\\{\\{.*console\\."
+  message: "Console statement in template"
+  suggestion: "Remove console statements from template"
+  autoFix: true
+
+# Dart 规则
+# DART-001 已禁用 - info 级别，不够实用
+# - id: DART-001
+#   name: Missing type annotation
+#   severity: info
+#   languages: [dart]
+#   pattern: "\\bvar\\s+[a-zA-Z_$]"
+#   message: "Variable declared with 'var' without type"
+#   suggestion: "Consider using explicit type annotation"
+#   autoFix: false
+
+- id: DART-002
+  name: Empty catch block
+  severity: error
+  languages: [dart]
+  pattern: "catch\\s*\\([^)]+\\)\\s*\\{\\s*\\}"
+  message: "Empty catch block"
+  suggestion: "Add error handling or logging in catch block"
+  autoFix: false
+
+# DART-003 已禁用 - .then() 有时是故意使用的，不一定是问题
+# - id: DART-003
+#   name: Missing async await
+#   severity: warning
+#   languages: [dart]
+#   pattern: "\\.then\\("
+#   message: "Using .then() instead of async/await"
+#   suggestion: "Consider using async/await for better readability"
+#   autoFix: false
+
+- id: DART-004
+  name: Print statement in production
+  severity: warning
+  languages: [dart]
+  pattern: "\\bprint\\("
+  message: "Print statement found"
+  suggestion: "Remove print or use proper logging framework"
+  autoFix: true
+
+# Dart 空值检查规则
+# 注意：DART-NULL-001 和 DART-NULL-002 已改为上下文分析检测
+# 由 analyzeDartNullableListAccess() 方法实现，检测逻辑：
+# 1. 识别 nullable list 变量定义（List<T?>, RxList<T?>）
+# 2. 追踪这些变量的 .first/.last 使用
+# 3. 检查使用前是否有空值保护（isEmpty, isNotEmpty, if 判断）
+# 只有在没有空值保护时才触发规则
+
+# DART-NULL-001 已移除 - 由上下文分析替代
+# 原正则 `(RxList|List)<[^>]+\\?>` 会误报所有变量定义行
+
+# DART-NULL-002 已移除单行正则检测 - 由上下文分析替代
+# 原正则无法检测空值保护上下文
+
+# DART-NULL-003 已移除 - 由上下文分析替代
+# 原正则 `RxList<[^>]*>\(\)` 会误报所有 RxList 构造调用
+# 新的 analyzeDartNullableListAccess() 方法已能检测 unsafe .first/.last 使用
+
+- id: DART-NULL-004
+  name: Force unwrap operator (context-aware)
+  severity: warning
+  languages: [dart]
+  # 已改为上下文分析检测 - 由 analyzeDartForceUnwrap() 方法实现
+  # 检测逻辑：识别 ! 强制解包，检查使用前是否有空值保护（if null check, ?.）
+  # pattern 仅用于文档说明，实际检测由 scanner/index.js 实现
+  pattern: "N/A - context-aware detection"
+  message: "使用 ! 强制解包可能导致运行时空指针异常"
+  suggestion: "使用 ?. 或 ?? 操作符进行安全的空值处理，或在使用前进行空值检查"
+  autoFix: false
+
+- id: DART-NULL-005
+  name: Unsafe nullable property chain (context-aware)
+  severity: warning
+  languages: [dart]
+  # 已改为上下文分析检测 - 由 analyzeDartPropertyChain() 方法实现
+  # 检测逻辑：识别多层属性访问 a.b.c，检查中间属性是否为 nullable 且无 ?. 保护
+  # pattern 仅用于文档说明，实际检测由 scanner/index.js 实现
+  pattern: "N/A - context-aware detection"
+  message: "多层属性访问缺少空值保护，中间属性可能为 null"
+  suggestion: "使用可选链 ?. 保护中间属性访问：a?.b?.c"
+  autoFix: false
+
+- id: DART-NULL-006
+  name: Late variable potential null access (context-aware)
+  severity: warning
+  languages: [dart]
+  # 已改为上下文分析检测 - 由 analyzeDartLateVariable() 方法实现
+  # 检测逻辑：识别 late 变量定义，检查是否在 initState/构造函数中初始化，追踪使用位置
+  # pattern 仅用于文档说明，实际检测由 scanner/index.js 实现
+  pattern: "N/A - context-aware detection"
+  message: "late 变量在初始化前访问会抛出 LateInitializationError"
+  suggestion: "确保在 initState/构造函数中完成初始化，或考虑使用 nullable 类型 ?"
+  autoFix: false
+
+# DART-005 已禁用 - info 级别，不够实用
+# - id: DART-005
+#   name: Build method without const
+#   severity: info
+#   languages: [dart]
+#   pattern: "Widget\\s+build\\([^)]+\\)\\s*(?!const)"
+#   message: "Build method could use const constructor"
+#   suggestion: "Consider using const constructors for better performance"
+#   autoFix: false
+
+# DART-006 已禁用 - info 级别，不够实用
+# - id: DART-006
+#   name: Missing const for Widgets
+#   severity: info
+#   languages: [dart]
+#   pattern: "\\b(Container|SizedBox|Padding|Center|Row|Column|Text)\\(\\s*\\w"
+#   message: "Widget constructor could be const"
+#   suggestion: "Consider using const for better performance"
+#   autoFix: false
+
+# DART-007 已禁用 - 不准确，会误报 void 函数和 Widget 的 build 方法
+# - id: DART-007
+#   name: Missing return type
+#   severity: warning
+#   languages: [dart]
+#   pattern: "\\w+\\s+\\w+\\s*\\([^)]*\\)\\s*(?!\\{[^}]*return|:)"
+#   message: "Function missing return type annotation"
+#   suggestion: "Add return type annotation to function"
+#   autoFix: false
+
+# DART-008 已禁用 - 使用 ignore 注解有时是必要的，不是真正的问题
+# - id: DART-008
+#   name: Ignore annotation
+#   severity: warning
+#   languages: [dart]
+#   pattern: "@IgnoreDeprecated\\(|@pragma\\([^)]*vm:ignore"
+#   message: "Using ignore annotation"
+#   suggestion: "Review if ignoring is necessary"
+#   autoFix: false
+
+# 通用规则
+# GEN-001 已禁用 - 文件长度限制是主观的，300 行不是硬性规定
+# - id: GEN-001
+#   name: File too long
+#   severity: warning
+#   languages: [javascript, typescript, vue, dart]
+#   message: "File exceeds recommended length (300 lines)"
+#   suggestion: "Consider splitting file into smaller modules"
+#   autoFix: false
+#   maxLines: 300
+
+# GEN-002 已禁用 - info 级别，缺少文件头注释不够实用
+# - id: GEN-002
+#   name: Missing file header comment
+#   severity: info
+#   languages: [javascript, typescript, vue, dart]
+#   pattern: "^(?!\\/\\/|\\/\\*|\\s*#|import|package|export)"
+#   message: "Missing file header comment"
+#   suggestion: "Add file header with description and author"
+#   autoFix: false
+
+# GEN-003 已禁用 - 行长度限制是主观的，120 字符不是硬性规定
+# - id: GEN-003
+#   name: Line too long
+#   severity: warning
+#   languages: [javascript, typescript, vue, dart]
+#   message: "Line exceeds 120 characters"
+#   suggestion: "Break long lines for better readability"
+#   autoFix: false
+#   maxLength: 120
+
+# GEN-004 已禁用 - info 级别，TODO 格式检查不够实用
+# - id: GEN-004
+#   name: TODO without code reference
+#   severity: info
+#   languages: [javascript, typescript, vue, dart]
+#   pattern: "\\/\\/\\s*TODO(?!\\s*\\[)"
+#   message: "TODO comment without code reference"
+#   suggestion: "Use format: // TODO: [CODE-ID] Description"
+#   autoFix: false

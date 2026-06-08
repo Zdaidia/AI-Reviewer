@@ -1,0 +1,111 @@
+﻿
+> ipcMain.handle('execu
+te-agent-tests', async 
+(event, testPlan, optio
+ns = {}) => {
+    // 保存渲染进程引用
+    currentRenderer = e
+vent.sender;
+  
+    try {
+      // 检查 aiTestAgent
+ 是否已初始化
+      if (!aiTestAgent)
+ {
+>       console.error('
+[execute-agent-tests] A
+I Test Agent 未初始化');
+        return {
+          success: fals
+e,
+          error: 'AI Te
+st Agent 未初始化，请重启应用'
+        };
+      }
+      // AI Smart Test 
+专用日志
+      function log(type
+, message, data = {}) {
+        const timestamp
+ = new Date().toLocaleT
+imeString('zh-CN', { ho
+ur12: false });
+        const logMessag
+e = `\n${timestamp} [AI
+智能测试] ${type} | ${messa
+ge}`;
+        const dataMessa
+ge = Object.keys(data).
+length > 0 ? `\n   数据: 
+${JSON.stringify(data, 
+null, 2)}` : '';
+  
+        // 输出到主进程控制台
+        console.log(log
+Message + dataMessage);
+  
+        // 发送到渲染进程
+        if (currentRend
+erer) {
+          currentRender
+er.send('ai-smart-test-
+log', {
+            timestamp,
+            type,
+            message,
+            data,
+          });
+        }
+      }
+  
+      /**
+       * 等待服务器就绪 - 使用原生
+ HTTP 请求检查
+       */
+      async function wa
+itForServerReady(url, t
+imeout = 60000) {
+        const http = re
+quire('http');
+        const https = r
+equire('https');
+        const startTime
+ = Date.now();
+        const checkInte
+rval = 2000; // 每2秒检查一次
+  
+        log('等待服务器', `等
+待服务器就绪: ${url}`);
+  
+        while (Date.now
+() - startTime < timeou
+t) {
+          try {
+            // 使用原生 HTT
+P/HTTPS 模块发送请求
+            const isHtt
+ps = url.startsWith('ht
+tps:');
+            const clien
+t = isHttps ? https : h
+ttp;
+            const urlOb
+j = new URL(url);
+  
+            // 将 localh
+ost 转换为 127.0.0.1 以避免 I
+Pv6 连接问题
+            let hostnam
+e = urlObj.hostname;
+            if (hostnam
+e === 'localhost' || ho
+stname === '::1') {
+              hostname 
+= '127.0.0.1';
+            }
+  
+            await new P
+romise((resolve, reject
+) => {
+
+

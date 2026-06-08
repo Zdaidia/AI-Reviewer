@@ -1,0 +1,6805 @@
+/**
+ * 分段执行引擎
+ *
+ * 负责执行单个分段的审查
+ */
+
+const { SegmentStatus } = require('../strategies/segment-strategy');
+const CodeSlicer = require('../utils/code-slicer');
+const { QAModelConfig } = require('../config/model-config');
+
+class SegmentExecutor {
+  constructor(options = {}) {
+    // QA Reviewer 实例
+    this.qaReviewer = options.qaReviewer;
+
+    // LLM 客户端
+    this.llm = options.llm;
+
+    // 代码扫描器
+    this.codeScanner = options.codeScanner;
+
+    // 深度分析器
+    this.deepAnalyzer = options.deepAnalyzer;
+
+    // 进度回调
+    this.onProgress = options.onProgress || null;
+
+    // 智能代码切片器
+    this.codeSlicer = new CodeSlicer({
+      maxFileSize: options.maxFileSize || 30 * 1024
+    });
+
+    // AI 上下文适配器
+    this.contextAdapter = options.contextAdapter || null;
+
+    // 代码图适配器
+    this.codeGraphAdapter = options.codeGraphAdapter || null;
+
+    // 模型可用性缓存（避免重复测试）
+    this.modelAvailabilityCache = new Map();
+  }
+
+  /**
+   * ============================================================
+   * P0: 智能模型回退机制
+   * ============================================================
+   */
+
+  /**
+   * 获取可用的模型（自动回退）
+   * @param {string} preferredModel - 首选模型
+   * @param {string} taskType - 任务类型
+   * @returns {string} 可用的模型名称
+   */
+  async getAvailableModel(preferredModel, taskType = 'code_review') {
+    // 检查缓存
+    if (this.modelAvailabilityCache.has(preferredModel)) {
+      const cached = this.modelAvailabilityCache.get(preferredModel);
+      if (cached.available && Date.now() - cached.checkTime < 300000) { // 5分钟缓存
+        console.log(`[SegmentExecutor] 使用缓存的可用模型: ${preferredModel}`);
+        return preferredModel;
+      }
+    }
+
+    // 获取回退列表
+    const fallbackList = QAModelConfig.getFallbackList(preferredModel);
+
+    console.log(`[SegmentExecutor] 检查模型可用性，候选: ${fallbackList.join(', ')}`);
+
+    for (const model of fallbackList) {
+      try {
+        const isAvailable = await this.testModelAvailability(model);
+        if (isAvailable) {
+          // 更新缓存
+          this.modelAvailabilityCache.set(model, {
+            available: true,
+            checkTime: Date.now()
+          });
+
+          if (model !== preferredModel) {
+            console.log(`[SegmentExecutor] 首选模型 ${preferredModel} 不可用，回退到 ${model}`);
+          }
+          return model;
+        }
+      } catch (e) {
+        console.log(`[SegmentExecutor] 模型 ${model} 测试失败: ${e.message}`);
+      }
+    }
+
+    // 所有模型都不可用，返回首选模型让调用方处理错误
+    console.warn(`[SegmentExecutor] 所有候选模型都不可用，使用首选模型: ${preferredModel}`);
+    return preferredModel;
+  }
+
+  /**
+   * 测试模型可用性
+   * @param {string} model - 模型名称
+   * @returns {boolean} 是否可用
+   */
+  async testModelAvailability(model) {
+    try {
+      const testResult = await this.llm.chat('simple_query', [
+        { role: 'user', content: 'ping' }
+      ], {
+        model,
+        maxTokens: 5,
+        temperature: 0.1,
+        timeout: 10000  // 10秒超时
+      });
+
+      const isAvailable = testResult.success &&
+                         !testResult.error?.includes('429') &&
+                         !testResult.error?.includes('余额不足');
+
+      // 缓存结果
+      this.modelAvailabilityCache.set(model, {
+        available: isAvailable,
+        checkTime: Date.now(),
+        error: testResult.error
+      });
+
+      return isAvailable;
+    } catch (error) {
+      this.modelAvailabilityCache.set(model, {
+        available: false,
+        checkTime: Date.now(),
+        error: error.message
+      });
+      return false;
+    }
+  }
+
+  /**
+   * ============================================================
+   * P1: 改进的 LLM 调用重试机制
+   * ============================================================
+   */
+
+  /**
+   * 带智能重试的 LLM 调用
+   * @param {string} taskType - 任务类型
+   * @param {Array} messages - 消息列表
+   * @param {Object} options - 调用选项
+   * @returns {Object} 调用结果
+   */
+  async callLLMWithRetry(taskType, messages, options = {}) {
+    const {
+      model: preferredModel,
+      maxRetries = QAModelConfig.getRetryConfig().maxRetries,
+      enableModelFallback = true
+    } = options;
+
+    let currentModel = preferredModel;
+
+    // 如果启用模型回退，先获取可用模型
+    if (enableModelFallback && preferredModel) {
+      currentModel = await this.getAvailableModel(preferredModel, taskType);
+    }
+
+    // 尝试调用，支持重试和模型切换
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      // 检查是否被取消
+      if (global.qaReviewerCancelled) {
+        console.log('[SegmentExecutor] 用户取消了审查');
+        return {
+          success: false,
+          error: '用户取消',
+          cancelled: true
+        };
+      }
+
+      try {
+        console.log(`[SegmentExecutor] LLM 调用 (尝试 ${attempt}/${maxRetries}), 模型: ${currentModel}`);
+
+        const requestOptions = { ...options, model: currentModel };
+        const result = await this.llm.chat(taskType, messages, requestOptions);
+
+        if (result.success) {
+          // 成功调用，清除该模型的不可用标记
+          if (this.modelAvailabilityCache.has(currentModel)) {
+            this.modelAvailabilityCache.set(currentModel, {
+              available: true,
+              checkTime: Date.now()
+            });
+          }
+          return result;
+        }
+
+        // 检查是否是可重试的错误
+        const errorInfo = {
+          success: false,
+          error: result.error || '未知错误',
+          status: result.status,
+          attempt
+        };
+
+        if (!QAModelConfig.isRetryableError(errorInfo)) {
+          console.log(`[SegmentExecutor] 不可重试的错误，直接返回: ${result.error}`);
+          return result;
+        }
+
+        // 是 429 或其他可重试错误
+        if (attempt < maxRetries) {
+          const delay = QAModelConfig.calculateRetryDelay(attempt);
+          console.log(`[SegmentExecutor] 遇到可重试错误 (${result.status || result.error}), ${delay}ms 后重试...`);
+
+          // 如果是余额不足且启用了模型回退，尝试下一个模型
+          if ((result.status === 429 || result.error?.includes('余额不足')) && enableModelFallback) {
+            const nextModel = await this.getNextAvailableModel(currentModel);
+            if (nextModel && nextModel !== currentModel) {
+              console.log(`[SegmentExecutor] 模型 ${currentModel} 余额不足，切换到 ${nextModel}`);
+              currentModel = nextModel;
+              // 重置尝试次数
+              attempt = 0;
+            }
+          }
+
+          await this.sleep(delay);
+        }
+
+        return errorInfo;
+
+      } catch (error) {
+        const errorInfo = {
+          success: false,
+          error: error.message,
+          attempt
+        };
+
+        if (!QAModelConfig.isRetryableError(errorInfo)) {
+          console.log(`[SegmentExecutor] 不可重试的异常，直接返回: ${error.message}`);
+          return errorInfo;
+        }
+
+        if (attempt < maxRetries) {
+          const delay = QAModelConfig.calculateRetryDelay(attempt);
+          console.log(`[SegmentExecutor] 异常重试 (${attempt}/${maxRetries}), ${delay}ms 后重试...`);
+          await this.sleep(delay);
+        }
+
+        if (attempt === maxRetries) {
+          return errorInfo;
+        }
+      }
+    }
+
+    return {
+      success: false,
+      error: '达到最大重试次数'
+    };
+  }
+
+  /**
+   * 获取下一个可用模型
+   * @param {string} currentModel - 当前模型
+   * @returns {string|null} 下一个可用模型
+   */
+  async getNextAvailableModel(currentModel) {
+    const fallbackList = QAModelConfig.getFallbackList(currentModel);
+    const currentIndex = fallbackList.indexOf(currentModel);
+
+    if (currentIndex === -1) return null;
+
+    // 尝试列表中的下一个模型
+    for (let i = currentIndex + 1; i < fallbackList.length; i++) {
+      const model = fallbackList[i];
+      // 跳过已知不可用的模型
+      const cached = this.modelAvailabilityCache.get(model);
+      if (cached && !cached.available) {
+        // 检查缓存是否过期（超过5分钟重新测试）
+        if (Date.now() - cached.checkTime < 300000) {
+          continue;
+        }
+      }
+
+      // 测试模型
+      const isAvailable = await this.testModelAvailability(model);
+      if (isAvailable) {
+        return model;
+      }
+    }
+
+    return null;
+  }
+
+  /**
+   * 休眠指定毫秒数
+   */
+  sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * ============================================================
+   * P3: 智能代码分块策略
+   * ============================================================
+   */
+
+  /**
+   * 计算分段复杂度
+   * @param {Array} files - 文件列表
+   * @returns {Object} 复杂度分析结果
+   */
+  calculateSegmentComplexity(files) {
+    const path = require('path');
+    const fs = require('fs');
+
+    // 文件类型权重（复杂度越高，权重越大）
+    const typeWeights = {
+      '.dart': 1.5,    // Flutter/Dart
+      '.jsx': 1.4,     // React JSX
+      '.tsx': 1.4,     // React TSX
+      '.vue': 1.3,     // Vue
+      '.js': 1.0,      // JavaScript
+      '.ts': 1.1,      // TypeScript
+      '.py': 1.2,      // Python
+      '.java': 1.3,    // Java
+      '.go': 1.2       // Go
+    };
+
+    // 目录权重（某些目录的代码更复杂）
+    const dirWeights = {
+      'controller': 1.3,
+      'service': 1.2,
+      'provider': 1.2,
+      'model': 1.1,
+      'view': 1.0,
+      'component': 1.1,
+      'utils': 0.9,
+      'common': 0.8
+    };
+
+    let totalSize = 0;
+    let weightedSize = 0;
+    let fileCount = files.length;
+    let complexFiles = 0;
+    let largeFiles = 0;
+
+    for (const file of files) {
+      const ext = path.extname(file.path || file);
+      const fileName = path.basename(file.path || file);
+      const dirName = path.dirname(file.path || file).split(/[/\\]/).pop().toLowerCase();
+
+      // 获取文件大小
+      let fileSize = 0;
+      try {
+        if (typeof file === 'string') {
+          fileSize = fs.statSync(file).size || 0;
+        } else if (file.size) {
+          fileSize = file.size;
+        }
+      } catch (e) {
+        fileSize = 5000; // 默认 5KB
+      }
+
+      totalSize += fileSize;
+
+      // 计算加权大小
+      const typeWeight = typeWeights[ext] || 1.0;
+      let dirWeight = 1.0;
+
+      for (const [dir, weight] of Object.entries(dirWeights)) {
+        if (dirName.includes(dir)) {
+          dirWeight = weight;
+          break;
+        }
+      }
+
+      const thisWeightedSize = fileSize * typeWeight * dirWeight;
+      weightedSize += thisWeightedSize;
+
+      // 统计复杂文件（> 10KB）
+      if (fileSize > 10240) {
+        largeFiles++;
+        complexFiles++;
+      }
+    }
+
+    // 计算平均文件大小
+    const avgFileSize = fileCount > 0 ? totalSize / fileCount : 0;
+
+    // 计算复杂度分数
+    const complexityScore = weightedSize / 1024; // KB
+
+    return {
+      totalSize,
+      weightedSize: complexityScore,
+      fileCount,
+      avgFileSize,
+      largeFiles,
+      complexFiles,
+      level: this.getComplexityLevel(complexityScore, fileCount)
+    };
+  }
+
+  /**
+   * 获取复杂度等级
+   */
+  getComplexityLevel(weightedSize, fileCount) {
+    if (weightedSize < 50 && fileCount <= 5) return 'low';
+    if (weightedSize < 150 && fileCount <= 15) return 'medium';
+    if (weightedSize < 300 && fileCount <= 25) return 'high';
+    return 'very-high';
+  }
+
+  /**
+   * 根据复杂度动态调整每段文件数
+   * @param {Object} complexity - 复杂度分析结果
+   * @returns {Object} 分段配置
+   */
+  getSegmentConfig(complexity) {
+    const configs = {
+      'low': {
+        maxFiles: 20,
+        maxSize: 100 * 1024,  // 100KB
+        description: '低复杂度：可包含更多文件'
+      },
+      'medium': {
+        maxFiles: 15,
+        maxSize: 80 * 1024,   // 80KB
+        description: '中复杂度：标准分段'
+      },
+      'high': {
+        maxFiles: 10,
+        maxSize: 60 * 1024,   // 60KB
+        description: '高复杂度：减少文件数'
+      },
+      'very-high': {
+        maxFiles: 5,
+        maxSize: 40 * 1024,   // 40KB
+        description: '极高复杂度：最小分段'
+      }
+    };
+
+    return configs[complexity.level] || configs['medium'];
+  }
+
+  /**
+   * 智能分段：根据复杂度将文件分组
+   * @param {Array} files - 所有文件
+   * @param {Object} context - 上下文
+   * @returns {Array} 分段后的文件组
+   */
+  smartSegmentFiles(files, context = {}) {
+    const segments = [];
+    const path = require('path');
+
+    // 按功能模块分组（基于目录结构）
+    const moduleGroups = this.groupByModule(files);
+
+    // 为每个模块组创建分段
+    for (const [moduleName, moduleFiles] of Object.entries(moduleGroups)) {
+      const complexity = this.calculateSegmentComplexity(moduleFiles);
+      const config = this.getSegmentConfig(complexity);
+
+      console.log(`[SegmentExecutor] 模块 ${moduleName}: ${complexity.level} 复杂度, ${moduleFiles.length} 个文件`);
+
+      // 如果文件数超过上限，需要进一步分块
+      if (moduleFiles.length > config.maxFiles) {
+        const chunks = this.chunkArray(moduleFiles, config.maxFiles);
+        for (let i = 0; i < chunks.length; i++) {
+          segments.push({
+            name: `${moduleName}_part${i + 1}`,
+            files: chunks[i],
+            complexity: this.calculateSegmentComplexity(chunks[i]),
+            config
+          });
+        }
+      } else {
+        segments.push({
+          name: moduleName,
+          files: moduleFiles,
+          complexity,
+          config
+        });
+      }
+    }
+
+    return segments;
+  }
+
+  /**
+   * 按功能模块分组文件
+   */
+  groupByModule(files) {
+    const path = require('path');
+    const groups = {};
+
+    for (const file of files) {
+      const filePath = file.path || file;
+      const dirName = path.dirname(filePath);
+
+      // 提取模块名（倒数第二级目录）
+      const parts = dirName.split(/[/\\]/);
+      let moduleName = 'other';
+
+      if (parts.length >= 2) {
+        // 尝试找到有意义的模块名
+        const possibleModuleNames = ['account', 'user', 'order', 'product', 'dashboard',
+                                      'login', 'register', 'settings', 'profile',
+                                      'admin', 'manage', 'list', 'detail'];
+
+        for (const part of parts.reverse()) {
+          if (possibleModuleNames.some(name => part.toLowerCase().includes(name))) {
+            moduleName = part;
+            break;
+          }
+        }
+
+        if (moduleName === 'other') {
+          moduleName = parts[parts.length - 2] || 'root';
+        }
+      }
+
+      if (!groups[moduleName]) {
+        groups[moduleName] = [];
+      }
+      groups[moduleName].push(file);
+    }
+
+    return groups;
+  }
+
+  /**
+   * 将数组分块
+   */
+  chunkArray(array, size) {
+    const chunks = [];
+    for (let i = 0; i < array.length; i += size) {
+      chunks.push(array.slice(i, i + size));
+    }
+    return chunks;
+  }
+
+  /**
+   * ============================================================
+   * 原有方法
+   * ============================================================
+   */
+
+  /**
+   * 执行单个分段
+   * @param {Segment} segment - 要执行的分段
+   * @param {Object} context - 执行上下文
+   * @returns {Object} 执行结果
+   */
+  async execute(segment, context = {}) {
+    console.log(`[SegmentExecutor] 执行分段: ${segment.name} (${segment.files.length} 个文件)`);
+
+    // 标记开始
+    segment.start();
+
+    if (this.onProgress) {
+      this.onProgress({
+        type: 'start',
+        segment,
+        stage: 'starting',
+        message: `开始审查: ${segment.name}`,
+        segmentIndex: segment.index || 0,
+        totalSegments: segment.totalSegments || 1
+      });
+    }
+
+    try {
+      // 1. 基础质量检查（工具处理）
+      if (this.onProgress) {
+        this.onProgress({
+          type: 'progress',
+          stage: 'quality-check',
+          message: '正在进行代码质量检查...',
+          segmentIndex: segment.index || 0,
+          totalSegments: segment.totalSegments || 1,
+          percent: 0
+        });
+      }
+
+      const qualityResults = await this.checkQuality(segment, context);
+
+      // 2. 需求符合性验证（AI 处理）
+      if (this.onProgress) {
+        this.onProgress({
+          type: 'progress',
+          stage: 'ai-analysis',
+          message: '正在调用 AI 进行需求符合性分析...',
+          segmentIndex: segment.index || 0,
+          totalSegments: segment.totalSegments || 1,
+          percent: 0
+        });
+      }
+
+      const requirementResults = await this.checkRequirements(segment, context);
+
+      // 检查是否有致命错误（如 API 余额不足）
+      if (requirementResults.fatal) {
+        console.error(`[SegmentExecutor] AI 分析出现致命错误: ${requirementResults.error}`);
+
+        // 标记失败
+        segment.fail(requirementResults.error);
+
+        if (this.onProgress) {
+          this.onProgress({
+            type: 'error',
+            segment,
+            error: new Error(requirementResults.error),
+            fatal: true
+          });
+        }
+
+        return {
+          success: false,
+          segment,
+          error: requirementResults.error,
+          fatal: true
+        };
+      }
+
+      // 3. 合并结果
+      if (this.onProgress) {
+        this.onProgress({
+          type: 'progress',
+          stage: 'merging',
+          message: '正在合并分析结果...',
+          segmentIndex: segment.index || 0,
+          totalSegments: segment.totalSegments || 1,
+          percent: 95
+        });
+      }
+
+      const results = this.mergeResults(qualityResults, requirementResults);
+
+      // 标记完成
+      segment.complete(results);
+
+      if (this.onProgress) {
+        this.onProgress({
+          type: 'complete',
+          stage: 'complete',
+          segment,
+          results,
+          message: `分段完成: ${segment.name} (${results.totalIssues} 个问题)`,
+          segmentIndex: segment.index || 0,
+          totalSegments: segment.totalSegments || 1,
+          percent: 100
+        });
+      }
+
+      console.log(`[SegmentExecutor] 分段完成: ${segment.name} (${results.totalIssues} 个问题)`);
+
+      return {
+        success: true,
+        segment,
+        results,
+      };
+    } catch (error) {
+      console.error(`[SegmentExecutor] 分段失败: ${segment.name}`, error.message);
+
+      // 标记失败
+      segment.fail(error.message);
+
+      if (this.onProgress) {
+        this.onProgress({ type: 'error', segment, error });
+      }
+
+      return {
+        success: false,
+        segment,
+        error: error.message,
+      };
+    }
+  }
+
+  /**
+   * 基础质量检查
+   */
+  async checkQuality(segment, context) {
+    const results = {
+      ruleIssues: [],
+      deepIssues: [],
+      totalIssues: 0,
+    };
+
+    // 规则引擎扫描
+    if (this.codeScanner) {
+      for (const file of segment.files) {
+        try {
+          const scanResult = await this.codeScanner.scanFile(file);
+          results.ruleIssues.push(...(scanResult.issues || []));
+        } catch (e) {
+          console.warn(`[SegmentExecutor] 扫描文件失败: ${file}`);
+        }
+      }
+    }
+
+    // 深度代码分析
+    if (this.deepAnalyzer) {
+      for (const file of segment.files) {
+        try {
+          const deepIssues = await this.deepAnalyzer.analyzeFile(file);
+          results.deepIssues.push(...deepIssues);
+        } catch (e) {
+          console.warn(`[SegmentExecutor] 深度分析失败: ${file}`);
+        }
+      }
+    }
+
+    results.totalIssues = results.ruleIssues.length + results.deepIssues.length;
+
+    return results;
+  }
+
+  /**
+   * 需求符合性验证（AI）
+   * 支持重试机制，处理 429 速率限制错误
+   * 支持两阶段审查流程
+   */
+  async checkRequirements(segment, context) {
+    if (!this.llm) {
+      return {
+        issues: [],
+        summary: 'LLM 未配置，跳过 AI 分析',
+        error: 'LLM 未配置'
+      };
+    }
+
+    // 检查是否启用两阶段流程（默认禁用，使用单阶段）
+    const useTwoPhase = context.useTwoPhase === true;
+
+    if (useTwoPhase) {
+      console.log('[SegmentExecutor] 使用两阶段审查流程（阶段1: glm-4 需求分析 → 阶段2: glm-5 代码审查）');
+      return await this.checkRequirementsTwoPhase(segment, context);
+    }
+
+    // 默认使用单阶段模式（glm-5 + Function Calling，AI 自己判断读取哪些文件）
+    console.log('[SegmentExecutor] 使用单阶段审查流程（glm-5 + Function Calling）');
+    return await this.checkRequirementsWithTools(segment, context);
+
+    // 完全传统模式：一次性发送所有代码
+    console.log('[SegmentExecutor] 使用传统模式（一次性发送所有代码）');
+    const prompt = this.buildPrompt(segment, context);
+
+    // 重试配置 - 遇到速率限制时等待用户选择
+    const maxRetries = 999; // 很大的数字，用户可以手动取消
+    let shouldRetry = true; // 用户是否选择继续重试
+
+    for (let attempt = 1; attempt <= maxRetries && shouldRetry; attempt++) {
+      try {
+        // 检查是否被取消（每次重试前都检查）
+        if (global.qaReviewerCancelled) {
+          console.log('[SegmentExecutor] 用户取消了审查（重试前检查）');
+          return {
+            issues: [],
+            summary: '用户取消了审查',
+            error: '用户取消',
+            cancelled: true
+          };
+        }
+
+        // 发送进度：正在调用 AI
+        if (this.onProgress && attempt === 1) {
+          this.onProgress({
+            type: 'progress',
+            stage: 'calling-ai',
+            message: '正在发送请求到 AI...',
+            segmentIndex: segment.index || 0,
+            totalSegments: segment.totalSegments || 1,
+            percent: 5
+          });
+        }
+
+        // 检查 LLM 类型并调用相应方法
+        let responseText;
+        if (typeof this.llm.chat === 'function') {
+          // LLMRouter 使用 chat() 方法，返回 { success, content, usage, model, provider, duration }
+          const response = await this.llm.chat('code_analysis', [
+            { role: 'user', content: prompt }
+          ], {
+            temperature: 0.3,
+            maxTokens: 16000,
+          });
+
+          // 检查响应是否成功
+          if (!response.success) {
+            const errorMsg = response.error || '未知错误';
+
+            // 检查是否是 429 速率限制错误
+            if (errorMsg.includes('429') || errorMsg.includes('速率限制') || response.errorStatus === 429) {
+              // 发送速率限制事件给前端，让用户选择是否继续
+              if (this.onProgress) {
+                this.onProgress({
+                  type: 'rate-limit',
+                  stage: 'rate-limit',
+                  message: '遇到速率限制，是否继续等待重试？',
+                  segmentIndex: segment.index || 0,
+                  totalSegments: segment.totalSegments || 1,
+                  canContinue: true,
+                  error: errorMsg
+                });
+              }
+
+              // 检查是否被取消（通过检查全局状态）
+              if (global.qaReviewerCancelled) {
+                console.log('[SegmentExecutor] 用户取消了审查');
+                return {
+                  issues: [],
+                  summary: '用户取消了审查',
+                  error: '用户取消',
+                  cancelled: true
+                };
+              }
+
+              if (attempt < maxRetries) {
+                // 检查是否被取消（等待重试前检查）
+                if (global.qaReviewerCancelled) {
+                  console.log('[SegmentExecutor] 用户取消了审查（等待重试前检查）');
+                  return {
+                    issues: [],
+                    summary: '用户取消了审查',
+                    error: '用户取消',
+                    cancelled: true
+                  };
+                }
+                console.warn(`[SegmentExecutor] 遇到速率限制，等待 30 秒后重试 (${attempt}/${maxRetries})...`);
+                await new Promise(resolve => setTimeout(resolve, 30000));
+                continue; // 重试
+              }
+            }
+
+            console.error('[SegmentExecutor] AI 调用失败:', errorMsg);
+            return {
+              issues: [],
+              summary: 'AI 分析失败: ' + errorMsg,
+              error: errorMsg,
+              fatal: true
+            };
+          }
+
+          // 提取内容
+          responseText = response.content || response.text || response.message || '';
+
+          if (!responseText) {
+            console.error('[SegmentExecutor] AI 返回内容为空');
+            return {
+              issues: [],
+              summary: 'AI 返回内容为空',
+              error: 'AI 返回内容为空',
+              fatal: true
+            };
+          }
+
+          console.log('[SegmentExecutor] AI 分析完成，使用模型:', response.model);
+
+          // 发送进度：AI 分析完成，正在解析结果
+          if (this.onProgress) {
+            this.onProgress({
+              type: 'progress',
+              stage: 'parsing',
+              message: `AI 分析完成，正在解析结果... (使用模型: ${response.model})`,
+              segmentIndex: segment.index || 0,
+              totalSegments: segment.totalSegments || 1,
+              percent: 95
+            });
+          }
+
+          // 在每个分段完成后添加延迟，避免智谱AI速率限制
+          // GLM Coding Plan 套餐延迟设为 30 秒
+          console.log('[SegmentExecutor] 等待 30 秒后继续下一个分段...');
+
+          // 检查是否被取消（分段间延迟前检查）
+          if (global.qaReviewerCancelled) {
+            console.log('[SegmentExecutor] 用户取消了审查（分段间延迟前检查）');
+            return {
+              issues: [],
+              summary: '用户取消了审查',
+              error: '用户取消',
+              cancelled: true
+            };
+          }
+
+          await new Promise(resolve => setTimeout(resolve, 30000));
+        } else if (typeof this.llm.call === 'function') {
+          // 兼容其他 LLM 客户端
+          responseText = await this.llm.call(prompt, {
+            temperature: 0.3,
+            maxTokens: 16000,
+          });
+        } else {
+          throw new Error('LLM 对象没有可用的调用方法');
+        }
+
+        // 代码审查完成，解析结果
+        const codeResults = this.parseResponse(responseText);
+
+        // 如果有 UI 图片，进行视觉分析（并行执行）
+        if (context.uiImage || context.figmaUrl) {
+          console.log('[SegmentExecutor] 代码审查完成，开始 UI 视觉分析...');
+
+          try {
+            const uiResults = await this.analyzeUI(context);
+
+            // 合并代码审查和 UI 分析结果
+            return {
+              ...codeResults,
+              issues: [...(codeResults.issues || []), ...(uiResults.issues || [])],
+              summary: this.mergeSummary(codeResults.summary, uiResults.summary)
+            };
+          } catch (uiError) {
+            console.warn('[SegmentExecutor] UI 分析失败，不影响代码审查结果:', uiError.message);
+            // UI 分析失败，只返回代码审查结果
+            return codeResults;
+          }
+        }
+
+        return codeResults;
+      } catch (e) {
+        const isRateLimitError = e.message.includes('429') || e.message.includes('速率限制');
+
+        // 检查是否被取消（catch块重试前检查）
+        if (global.qaReviewerCancelled) {
+          console.log('[SegmentExecutor] 用户取消了审查（异常处理中检查）');
+          return {
+            issues: [],
+            summary: '用户取消了审查',
+            error: '用户取消',
+            cancelled: true
+          };
+        }
+
+        if (isRateLimitError && attempt < maxRetries) {
+          console.warn(`[SegmentExecutor] 遇到速率限制，等待 30 秒后重试 (${attempt}/${maxRetries})...`);
+          await new Promise(resolve => setTimeout(resolve, 30000));
+          continue; // 重试
+        }
+
+        console.error(`[SegmentExecutor] AI 分析失败: ${e.message}`);
+        return {
+          issues: [],
+          summary: 'AI 分析失败: ' + e.message,
+          error: e.message,
+          fatal: true
+        };
+      }
+    }
+
+    // 如果所有重试都失败
+    return {
+      issues: [],
+      summary: 'AI 分析失败: 达到最大重试次数',
+      error: '达到最大重试次数',
+      fatal: true
+    };
+  }
+
+  /**
+   * 估算文件总大小
+   */
+  estimateTotalSize(files) {
+    const fs = require('fs');
+    let totalSize = 0;
+
+    for (const filePath of files) {
+      try {
+        if (fs.existsSync(filePath)) {
+          const stats = fs.statSync(filePath);
+          totalSize += stats.size;
+        }
+      } catch (e) {
+        // 忽略无法读取的文件
+      }
+    }
+
+    return totalSize;
+  }
+
+  /**
+   * 根据用户选择的维度生成审查任务
+   * @param {Array|Object} dimensions - 维度配置（数组格式：['functionality', ...] 或对象格式：{ functionality: true, ... }）
+   */
+  generateReviewTasks(dimensions = {}) {
+    const tasks = {
+      requirementMatching: false,
+      contractChecking: false,
+      robustnessChecking: false,
+      securityChecking: false,
+      optimization: false
+    };
+
+    // 兼容数组格式和对象格式
+    let enabledDimensions = {};
+
+    if (Array.isArray(dimensions)) {
+      // 数组格式：['functionality', 'uiConsistency', ...] 转换为对象格式
+      dimensions.forEach(dim => {
+        enabledDimensions[dim] = true;
+      });
+      console.log('[SegmentExecutor] dimensions 是数组格式，已转换为对象:', enabledDimensions);
+    } else {
+      // 对象格式：直接使用
+      enabledDimensions = dimensions || {};
+    }
+
+    // 映射维度到审查任务（五维对齐审查架构）
+    // 支持新八维名称（直接匹配）和旧名称（兼容映射）
+
+    // 维度 1: Requirement Matching（需求匹配）
+    if (enabledDimensions.requirementMatching || enabledDimensions.functionality || enabledDimensions.uiConsistency) {
+      tasks.requirementMatching = true;
+    }
+
+    // 维度 2: Contract Checking（契约检查）
+    if (enabledDimensions.contractChecking || enabledDimensions.functionality || enabledDimensions.dataValidation) {
+      tasks.contractChecking = true;
+    }
+
+    // 维度 3: Robustness Checking（健壮性检查）
+    if (enabledDimensions.robustnessChecking || enabledDimensions.dataValidation || enabledDimensions.exceptionHandling || enabledDimensions.quality) {
+      tasks.robustnessChecking = true;
+    }
+
+    // 维度 4: Security Checking（安全检查）
+    if (enabledDimensions.securityChecking || enabledDimensions.security) {
+      tasks.securityChecking = true;
+    }
+
+    // 维度 5: Optimization（优化建议）
+    if (enabledDimensions.optimization || enabledDimensions.quality || enabledDimensions.performance || enabledDimensions.maintainability || enabledDimensions.accessibility || enabledDimensions.compatibility) {
+      tasks.optimization = true;
+    }
+
+    // 如果没有指定任何维度，默认启用所有任务（五维全面审查）
+    if (Object.keys(enabledDimensions).length === 0) {
+      tasks.requirementMatching = true;
+      tasks.contractChecking = true;
+      tasks.robustnessChecking = true;
+      tasks.securityChecking = true;
+      tasks.optimization = true;
+    }
+
+    console.log('[SegmentExecutor] 审查任务配置 (五维对齐):', tasks);
+    return tasks;
+  }
+
+  /**
+   * 根据审查任务构建 JSON 格式示例的字段部分（五维对齐审查架构）
+   */
+  buildJsonFields(reviewTasks) {
+    console.log('[SegmentExecutor] buildJsonFields 被调用 (五维架构), reviewTasks:', reviewTasks);
+    if (!reviewTasks) {
+      console.error('[SegmentExecutor] buildJsonFields: reviewTasks 是 null/undefined!');
+      return '';
+    }
+    let fields = '';
+
+    // 维度 1: Requirement Matching（需求匹配）- 简化格式，避免巨大数组
+    // 🚨 禁止使用 covered/missing 数组，使用计数格式
+    const requirementMatchingTemplate = `,
+  "requirementMatching": {
+    "status": "passed|failed|partial",
+    "score": 85,
+    "totalRequirements": 100,
+    "implementedCount": 85,
+    "missingCount": 15,
+    "issues": [
+      {
+        "requirement": "需求描述",
+        "status": "passed|failed|missing",
+        "note": "具体说明",
+        "file": "文件路径（可选）",
+        "line": 行号（可选）
+      }
+    ]
+  }`;
+
+    // 维度 2: Contract Checking（契约检查）- 检查清单结构
+    const contractCheckingTemplate = `,
+  "contractChecking": {
+    "status": "passed|failed|partial|warning",
+    "score": 75,
+    "checklist": {
+      "apiCall": {
+        "description": "API 调用规范性",
+        "status": "passed|failed|warning",
+        "issues": [
+          {
+            "ruleId": "QA-CONT-API-001",
+            "severity": "high|medium|low",
+            "file": "文件路径",
+            "line": 123,
+            "message": "API 路径错误",
+            "suggestion": "修复建议"
+          }
+        ]
+      },
+      "params": {
+        "description": "请求参数完整性",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "response": {
+        "description": "响应数据处理",
+        "status": "passed|failed|warning",
+        "issues": []
+      }
+    }
+  }`;
+
+    // 维度 3: Robustness Checking（健壮性检查）- 全新检查清单
+    // ⚠️ 行号定位规则：
+    // - 错误处理缺失 → 函数定义行（应该添加 try-catch 的函数）
+    // - 边界校验缺失 → 使用变量的那一行
+    // - 数据验证缺失 → 函数参数定义后的第一行
+    // - 资源管理缺失（如 dispose）→ Controller 类定义行
+    const robustnessCheckingTemplate = `,
+  "robustnessChecking": {
+    "status": "passed|failed|partial|warning",
+    "score": 55,
+    "checklist": {
+      "errorHandling": {
+        "description": "错误处理机制",
+        "status": "passed|failed|warning",
+        "issues": [
+          {
+            "ruleId": "QA-ROB-ERR-001",
+            "severity": "high",
+            "file": "E:\\\\2025\\\\project\\\\lib\\\\controllers\\\\account_management_controller.dart",
+            "line": 45,
+            "message": "fetchAccountList 函数缺少 try-catch 错误处理",
+            "suggestion": "在函数定义行添加 try-catch: try { await api.call(); } catch (e) { ... }"
+          }
+        ]
+      },
+      "boundaryValidation": {
+        "description": "边界条件校验",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "dataValidation": {
+        "description": "数据类型验证",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "resourceManagement": {
+        "description": "资源管理",
+        "status": "passed|failed|warning",
+        "issues": [
+          {
+            "ruleId": "QA-ROB-RES-001",
+            "severity": "medium",
+            "file": "E:\\\\2025\\\\project\\\\lib\\\\controllers\\\\account_management_controller.dart",
+            "line": 1,
+            "message": "Controller 缺少 dispose() 方法释放资源",
+            "suggestion": "添加 @override void onClose() { super.onClose(); }"
+          }
+        ]
+      }
+    }
+  }`;
+
+    // 维度 4: Security Checking（安全检查）- 全新检查清单
+    const securityCheckingTemplate = `,
+  "securityChecking": {
+    "status": "passed|failed|partial|warning",
+    "score": 70,
+    "checklist": {
+      "inputSecurity": {
+        "description": "输入安全",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "dataSecurity": {
+        "description": "数据安全",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "authSecurity": {
+        "description": "认证授权",
+        "status": "passed|failed|warning",
+        "issues": []
+      }
+    }
+  }`;
+
+    // 维度 5: 拆分为 accessibility/compatibility/performance/maintainability 四个子维度
+    const accessibilityTemplate = `,
+  "accessibility": {
+    "status": "passed|failed|partial|warning",
+    "score": 85,
+    "checklist": {
+      "ariaSupport": {
+        "description": "无障碍标签与语义化",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "keyboardNav": {
+        "description": "键盘导航与焦点管理",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "colorContrast": {
+        "description": "颜色对比度与可读性",
+        "status": "passed|failed|warning",
+        "issues": []
+      }
+    }
+  }`;
+
+    const compatibilityTemplate = `,
+  "compatibility": {
+    "status": "passed|failed|partial|warning",
+    "score": 90,
+    "checklist": {
+      "browserCompat": {
+        "description": "浏览器/平台兼容性",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "responsive": {
+        "description": "响应式适配",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "i18n": {
+        "description": "多语言/国际化支持",
+        "status": "passed|failed|warning",
+        "issues": []
+      }
+    }
+  }`;
+
+    const performanceTemplate = `,
+  "performance": {
+    "status": "passed|failed|partial|warning",
+    "score": 80,
+    "checklist": {
+      "renderOpt": {
+        "description": "渲染性能（不必要重建、大列表优化）",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "resourceMgmt": {
+        "description": "资源管理（内存泄漏、定时器清理、Controller dispose）",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "networkOpt": {
+        "description": "网络优化（重复请求、缓存策略）",
+        "status": "passed|failed|warning",
+        "issues": []
+      }
+    }
+  }`;
+
+    const maintainabilityTemplate = `,
+  "maintainability": {
+    "status": "passed|failed|partial|warning",
+    "score": 75,
+    "checklist": {
+      "codeStructure": {
+        "description": "代码结构（组件拆分、重复代码、命名规范、拼写错误）",
+        "status": "passed|failed|warning",
+        "issues": [
+          {
+            "ruleId": "QA-MNT-STR-001",
+            "severity": "low",
+            "file": "文件完整路径",
+            "line": 250,
+            "message": "筛选逻辑重复出现，建议抽取为公共函数",
+            "suggestion": "将重复的筛选逻辑抽取为独立的 filterAccounts 函数"
+          }
+        ]
+      },
+      "naming": {
+        "description": "命名规范（方法名/变量名/类名拼写是否正确，如 handel→handle）",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "errorHandling": {
+        "description": "错误处理规范性",
+        "status": "passed|failed|warning",
+        "issues": []
+      },
+      "readability": {
+        "description": "可读性（注释、复杂度）",
+        "status": "passed|failed|warning",
+        "issues": []
+      }
+    }
+  }`;
+
+    // issues 字段（补充性问题，不要重复维度已覆盖的内容）
+    const issuesField = `,
+  "issues": [
+    {
+      "ruleId": "QA-FUNC-001",
+      "severity": "high|medium|low",
+      "file": "文件路徑",
+      "line": 123,
+      "message": "仅记录维度未覆盖的补充问题（如跨维度问题、流程问题）",
+      "suggestion": "實現建議",
+      "dimension": "requirementMatching|contractChecking|robustnessChecking|securityChecking|accessibility|compatibility|performance|maintainability"
+    }
+  ]
+  ⚠️ issues 数组规则：不要重复列出已在各维度 checklist.issues 中报告的问题！issues 仅用于收集跨维度的补充问题。
+
+  ⚠️ **跨维度去重规则**：
+  - 同一代码位置的同一问题，只报告一次，选择最贴切的维度和 ruleId
+  - 不要在多个维度中重复报告相同的代码缺陷（如健壮性和性能都提到"资源未释放"，只在一个维度报告）`;
+
+    // 按顺序添加字段（五维顺序）
+    if (reviewTasks.requirementMatching) {
+      fields += requirementMatchingTemplate;
+    }
+    if (reviewTasks.contractChecking) {
+      fields += contractCheckingTemplate;
+    }
+    if (reviewTasks.robustnessChecking) {
+      fields += robustnessCheckingTemplate;
+    }
+    if (reviewTasks.securityChecking) {
+      fields += securityCheckingTemplate;
+    }
+    if (reviewTasks.optimization) {
+      fields += accessibilityTemplate;
+      fields += compatibilityTemplate;
+      fields += performanceTemplate;
+      fields += maintainabilityTemplate;
+    }
+
+    // 始终添加 issues 字段
+    fields += issuesField;
+
+    return fields;
+  }
+
+  /**
+   * 预处理需求文本，提取关键信息用于细节检查
+   * @param {string} requirementText - 原始需求文本
+   * @returns {Object} 提取的需求关键信息
+   */
+  preprocessRequirements(requirementText) {
+    const result = {
+      rawText: requirementText,
+      fields: [],
+      formats: {
+        nullValue: null,
+        dateFormat: null,
+        numberFormat: null,
+        dateTimeFormat: null
+      },
+      displayRequirements: [],
+      specialRules: []
+    };
+
+    if (!requirementText || typeof requirementText !== 'string') {
+      return result;
+    }
+
+    const text = requirementText;
+
+    // 1. 提取字段列表（支持多种表达方式）
+    // 模式：显示: ID、名称、邮件 | 字段：ID, 名称 | 显示字段为 ID、名称
+    // 支持简繁体：显示/顯示, 栏位/欄位
+    const fieldPatterns = [
+      /(?:显示|顯示|字段|栏位|欄位|列)[::：]\s*([^\n。]+)/,
+      /(?:包含|包括|有)[::：]\s*([^\n。]+?)(?:字段|栏位|欄位|列)/,
+      /(?:需要显示|需要顯示|要求显示|要求顯示|应显示|應顯示)[::：]\s*([^\n。]+)/
+    ];
+
+    for (const pattern of fieldPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        console.log('[SegmentExecutor] 字段提取匹配成功，原始匹配:', match[1]);
+        let fieldsStr = match[1];
+        // 排除后面的格式说明部分
+        const formatMarkers = ['，所有栏位', '，所有欄位', ',所有栏位', ',所有欄位', '，空值', ',空值', '，需要', ',需要'];
+        for (const marker of formatMarkers) {
+          const markerIndex = fieldsStr.indexOf(marker);
+          if (markerIndex > 0) {
+            console.log('[SegmentExecutor] 找到格式标记:', marker, '在位置:', markerIndex);
+            fieldsStr = fieldsStr.substring(0, markerIndex);
+            break;
+          }
+        }
+        console.log('[SegmentExecutor] 处理后的字段字符串:', fieldsStr);
+        // 分割字段（支持中文、英文逗号、顿号、空格）
+        result.fields = fieldsStr.split(/[,，、]/).map(f => f.trim()).filter(f => f);
+        console.log('[SegmentExecutor] 最终字段列表:', result.fields);
+        break;
+      }
+    }
+
+    // 2. 提取空值显示格式
+    // 模式：空值显示为 '--' | 没有值时显示 '--' | null 显示为 '--'
+    // 支持中英文引号：' " ' " 以及 "呈现为'XX'" 这种中文表达
+    const quotePattern = `['"''"]`;  // 英文单引号、英文双引号、中文单引号、中文双引号
+    const nullValuePatterns = [
+      // 模式1: "需要呈现为'XX'" - 最常见的中文表达
+      new RegExp(`(?:需要|应|要)?(?:呈现|显示)(?:为|是)?(?:[时当])?(?:没有对应值|空值|null|undefined|为空|无数据)?[，,]?${quotePattern}([^'"''"]+)${quotePattern}`),
+      // 模式2: "空值显示为'XX'"
+      new RegExp(`(?:没有对应值|空值|null|undefined|为空|无数据)[，,]?(?:需要|应|要)?(?:呈现|显示)(?:为|is)?[::：]?\\s*${quotePattern}([^'"''"]+)${quotePattern}`),
+      // 模式3: "显示:'XX'" (当没有值时)
+      new RegExp(`(?:呈现|显示)[::：](?:为|is)?\\s*${quotePattern}([^'"''"]+)${quotePattern}\\s*[当在](?:没有值|空值)`),
+      // 模式4: 简单模式：引号包围的内容，前后有呈现/显示关键字
+      new RegExp(`(?:呈现|显示).*?${quotePattern}([^'"''"]+)${quotePattern}`),
+      // 回退模式
+      /--.*?空值|--.*?没有值/,
+      /N\/A.*?空值/
+    ];
+
+    for (const pattern of nullValuePatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        result.formats.nullValue = match[1];
+        result.displayRequirements.push({
+          type: 'nullValue',
+          requirement: match[1],
+          source: match[0]
+        });
+        break;
+      }
+    }
+
+    // 特殊检查：如果需求中明确写了 '--'
+    if (text.includes('--') && !result.formats.nullValue) {
+      // 查找 '--' 前后的上下文
+      const contextMatch = text.match(/.{0,20}--.{0,20}/);
+      if (contextMatch && (contextMatch[0].includes('显示') || contextMatch[0].includes('呈现') || contextMatch[0].includes('空值') || contextMatch[0].includes('没有值'))) {
+        result.formats.nullValue = '--';
+        result.displayRequirements.push({
+          type: 'nullValue',
+          requirement: '--',
+          source: contextMatch[0]
+        });
+      }
+    }
+
+    // 3. 提取日期格式
+    // 模式：日期格式为 'YYYY-MM-DD' | 时间格式 'YYYY-MM-DD HH:mm:ss' | 需要为'XX'格式 | 格式:'XX' | 格式: YYYY-MM-DD
+    // 支持中英文引号：' " ' "  以及无引号格式
+    const quotePattern2 = `['"''"]`;  // 英文单引号、英文双引号、中文单引号、中文双引号
+    const datePatterns = [
+      // 模式1: "格式:'XX'" 或 "格式: 'XX'" - 带引号的表达方式
+      new RegExp(`(?:格式|format)[::：]?\\s*(?:为|is)?\\s*${quotePattern2}([^'"''"]+)${quotePattern2}`, 'i'),
+      // 模式2: "格式: YYYY-MM-DD" - 无引号的表达方式（用户常用）
+      new RegExp(`(?:格式|format)[::：]\\s*(?:为|is)?\\s*([A-Za-z]{4}[-_/][A-Za-z]{2}[-_/][A-Za-z]{2,4}(?:\\s+[A-Za-z]{2}[:-]?[A-Za-z]{2}[:-]?[A-Za-z]{2})?)`, 'i'),
+      // 模式3: "需要为'XX'格式" - 常见中文表达
+      new RegExp(`(?:需要|应|要)(?:为|是)?${quotePattern2}([^'"''"]+)${quotePattern2}(?:格式|format)`, 'i'),
+      // 模式4: "日期/时间格式:'XX'"
+      new RegExp(`(?:日期|时间|datetime|建立時間|修改時間)[?:期]?.*?(?:格式|format)[::：]?\\s*${quotePattern2}([^'"''"]+)${quotePattern2}`, 'i'),
+      // 模式5: "格式为'XX' (日期)"
+      new RegExp(`(?:格式|format)(?:为|is)?[::：]?\\s*${quotePattern2}([^'"''"]+)${quotePattern2}.*?(?:日期|时间|date)`, 'i'),
+      // 模式6: "建立/修改时间...格式: YYYY-MM-DD" - 无引号的时间格式
+      new RegExp(`(?:建立時間|修改時間|日期|时间).*?(?:格式|format)[::：]\\s*([A-Za-z]{4}[-_/][A-Za-z]{2}[-_/][A-Za-z]{2,4}(?:\\s+[A-Za-z]{2}[:-]?[A-Za-z]{2}[:-]?[A-Za-z]{2})?)`, 'i')
+    ];
+
+    for (const pattern of datePatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        result.formats.dateFormat = match[1];
+        result.displayRequirements.push({
+          type: 'dateFormat',
+          requirement: match[1],
+          source: match[0]
+        });
+        break;
+      }
+    }
+
+    // 4. 提取数字格式
+    // 模式：保留2位小数 | 精确到0.01
+    const numberPatterns = [
+      /(?:保留|精确|小数位)[：:]\s*(\d+)\s*[位个]小数/,
+      /(?:小数位|decimal)[：:]\s*(\d+)/
+    ];
+
+    for (const pattern of numberPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        result.formats.numberFormat = `${match[1]}位小数`;
+        break;
+      }
+    }
+
+    // 5. 提取特殊显示要求
+    // 模式：状态显示为 中文 | 状态用 颜色 区分
+    // 支持中英文引号：' " ' "
+    const quotePattern3 = `['"''"]`;  // 英文单引号、英文双引号、中文单引号、中文双引号
+    const specialPatterns = [
+      new RegExp(`状态[::：]\\s*${quotePattern3}?([^，,\\n\`"''"]+)${quotePattern3}?(?:显示|呈现)`),
+      new RegExp(`使用\\s*${quotePattern3}([^'"''"]+)${quotePattern3}\\s*分隔`),
+      new RegExp(`颜色[::：]\\s*${quotePattern3}?([^，,\\n\`"''"]+)${quotePattern3}?\\s*区分`)
+    ];
+
+    for (const pattern of specialPatterns) {
+      const match = text.match(pattern);
+      if (match) {
+        result.specialRules.push({
+          type: 'display',
+          requirement: match[1],
+          source: match[0]
+        });
+        break;
+      }
+    }
+
+    // 6. 提取功能描述（用于概括）
+    const featureMatch = text.match(/(?:页面|功能|模块)[：:]\s*([^\n，。]+)/);
+    if (featureMatch) {
+      result.featureName = featureMatch[1];
+    }
+
+    // 打印提取结果（调试用）
+    console.log('[SegmentExecutor] 需求预处理结果:', {
+      featureName: result.featureName,
+      fieldsCount: result.fields.length,
+      fields: result.fields,
+      formats: result.formats,
+      displayRequirementsCount: result.displayRequirements.length
+    });
+
+    // 写入临时文件用于调试
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const debugPath = path.join(require('os').tmpdir(), 'qa-requirement-preprocess-debug.json');
+      fs.writeFileSync(debugPath, JSON.stringify({
+        timestamp: new Date().toISOString(),
+        rawText: text,
+        result: result
+      }, null, 2));
+      console.log('[SegmentExecutor] 需求预处理调试信息已写入:', debugPath);
+    } catch (e) {
+      console.error('[SegmentExecutor] 写入调试文件失败:', e.message);
+    }
+
+    return result;
+  }
+
+  /**
+   * 构建 AI 提示词（使用智能代码切片或完整代码模式）
+   */
+  buildPrompt(segment, context) {
+    const { requirements, dimensions, apiDocAdapter, projectPath } = context;
+    const fs = require('fs');
+    const path = require('path');
+
+    // ============================================
+    // 根据用户选择的维度确定审查任务
+    // ============================================
+    const reviewTasks = this.generateReviewTasks(dimensions);
+
+    // ============================================
+    // 0. 获取项目上下文信息（AI 上下文 + 代码图）
+    // ============================================
+    let projectContext = '';
+
+    // 从 AI 上下文获取项目信息
+    if (this.contextAdapter && this.contextAdapter.isAvailable()) {
+      const contextSummary = this.contextAdapter.getSummary();
+      console.log(`[SegmentExecutor] 使用 AI 上下文: ${contextSummary}`);
+
+      // 获取与当前功能点相关的上下文
+      const featureContext = this.contextAdapter.getContextForFeature(segment.features[0] || segment.name);
+
+      // 构建 UI 组件信息
+      if (featureContext.uiElements && featureContext.uiElements.length > 0) {
+        projectContext += `\n【项目 UI 组件库】\n`;
+        projectContext += `本项目使用的 UI 组件：\n`;
+        featureContext.uiElements.slice(0, 10).forEach(ui => {
+          projectContext += `   - ${ui.name}${ui.file ? ` (${ui.file})` : ''}\n`;
+        });
+        projectContext += `\n提示：这些是项目自有的 UI 组件，看到它们就说明相关功能已实现。\n\n`;
+      }
+
+      // 构建数据模型信息
+      if (featureContext.classes && featureContext.classes.length > 0) {
+        projectContext += `【数据模型】\n`;
+        featureContext.classes.slice(0, 5).forEach(model => {
+          projectContext += `   - ${model.name}${model.fields ? ` {${model.fields.join(', ')}}` : ''}\n`;
+        });
+        projectContext += `\n`;
+      }
+
+      // 构建 API 信息
+      if (featureContext.apis && featureContext.apis.length > 0) {
+        projectContext += `【API 接口】\n`;
+        featureContext.apis.slice(0, 5).forEach(api => {
+          projectContext += `   - ${api.method || 'GET'} ${api.endpoint || api.url || api.name}\n`;
+        });
+        projectContext += `\n`;
+      }
+    }
+
+    // 从代码图获取依赖关系
+    if (this.codeGraphAdapter && this.codeGraphAdapter.codeGraph) {
+      try {
+        // 获取当前分段相关的类信息
+        const relatedClasses = [];
+        for (const filePath of segment.files) {
+          const nodes = this.codeGraphAdapter.codeGraph.nodes.filter(n => {
+            const nodeFile = n.filePath || n.file || '';
+            return nodeFile === filePath && n.type === 'class';
+          });
+          relatedClasses.push(...nodes);
+        }
+
+        if (relatedClasses.length > 0) {
+          projectContext += `【类依赖关系】\n`;
+          relatedClasses.slice(0, 5).forEach(node => {
+            projectContext += `   - ${node.name} (${node.file ? path.basename(node.file) : 'unknown'})\n`;
+            if (node.dependencies && node.dependencies.length > 0) {
+              const deps = node.dependencies.slice(0, 3).map(d => d.name || d).join(', ');
+              projectContext += `     依赖: ${deps}${node.dependencies.length > 3 ? '...' : ''}\n`;
+            }
+          });
+          projectContext += `\n`;
+        }
+      } catch (e) {
+        console.warn('[SegmentExecutor] 获取代码图信息失败:', e.message);
+      }
+    }
+
+    // ============================================
+    // 1. 文件角色分析（复用 main.js 的 inferFileType）
+    // ============================================
+    const inferFileType = (filePath, projectType = 'flutter') => {
+      const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+      const fileName = path.basename(filePath).toLowerCase();
+      const ext = path.extname(filePath).toLowerCase();
+
+      // 测试文件
+      if (fileName.includes('.test.') || fileName.includes('.spec.') ||
+          fileName.includes('_test.') || fileName.endsWith('_test.dart') ||
+          normalizedPath.includes('/test/') || normalizedPath.includes('/tests/')) {
+        return 'test';
+      }
+
+      // 生成的文件
+      if (fileName.includes('.generated.') || fileName.includes('.g.') ||
+          fileName.includes('.freezed.') || fileName.includes('.mock.')) {
+        return 'generated';
+      }
+
+      // 路由文件
+      if (fileName.includes('route') || fileName.includes('router') ||
+          normalizedPath.includes('/route/') || normalizedPath.includes('/router/')) {
+        return 'route';
+      }
+
+      // 配置文件
+      if (fileName.includes('config') || fileName.includes('setting') ||
+          ext === '.json' || ext === '.yaml' || ext === '.yml') {
+        return 'config';
+      }
+
+      // 多语言文件
+      if (fileName.includes('i18n') || fileName.includes('locale') ||
+          fileName.includes('lang') || fileName.includes('translation') ||
+          normalizedPath.includes('/locale/') || normalizedPath.includes('/i18n/')) {
+        return 'i18n';
+      }
+
+      // 根据项目类型推断（同时支持单数和复数目录名）
+      if (projectType === 'flutter') {
+        if (normalizedPath.includes('/pages/') || normalizedPath.includes('/views/') ||
+            normalizedPath.includes('/view/') || normalizedPath.includes('/screens/')) {
+          return 'view';
+        }
+        if (normalizedPath.includes('/controllers/') || normalizedPath.includes('/controller/') ||
+            normalizedPath.includes('/viewmodels/')) {
+          return 'controller';
+        }
+        if (normalizedPath.includes('/models/') || normalizedPath.includes('/model/') ||
+            normalizedPath.includes('/entities/')) {
+          return 'model';
+        }
+        if (normalizedPath.includes('/services/') || normalizedPath.includes('/service/') ||
+            normalizedPath.includes('/providers/') || normalizedPath.includes('/repositories/')) {
+          return 'service';
+        }
+        if (normalizedPath.includes('/widgets/') || normalizedPath.includes('/components/')) {
+          return 'component';
+        }
+        if (normalizedPath.includes('/api/') || normalizedPath.includes('/https/') ||
+            normalizedPath.includes('/datasources/')) {
+          return 'api';
+        }
+      } else if (['react', 'vue', 'angular'].includes(projectType)) {
+        if (normalizedPath.includes('/pages/') || normalizedPath.includes('/views/') ||
+            normalizedPath.includes('/view/') || ext === '.vue' || normalizedPath.includes('/screens/')) {
+          return 'view';
+        }
+        if (normalizedPath.includes('/services/') || normalizedPath.includes('/service/') ||
+            normalizedPath.includes('/api/')) {
+          return 'service';
+        }
+        if (normalizedPath.includes('/components/') || normalizedPath.includes('/ui/')) {
+          return 'component';
+        }
+        if (normalizedPath.includes('/models/') || normalizedPath.includes('/model/') ||
+            normalizedPath.includes('/types/')) {
+          return 'model';
+        }
+      }
+
+      // 通用推断
+      if (/_page\.(dart|js|jsx|ts|tsx)$/.test(fileName) || /_view\.(dart|js|jsx|ts|tsx)$/.test(fileName)) {
+        return 'view';
+      }
+      if (/_controller\.(dart|js|ts)$/.test(fileName) || /_viewmodel\.(dart|js|ts)$/.test(fileName)) {
+        return 'controller';
+      }
+      if (/_model\.(dart|js|ts)$/.test(fileName) || /_entity\.(dart|js|ts)$/.test(fileName)) {
+        return 'model';
+      }
+      if (/_api\.(dart|js|ts)$/.test(fileName) || /_service\.(dart|js|ts)$/.test(fileName) ||
+          /_provider\.(dart|js|ts)$/.test(fileName)) {
+        return 'service';
+      }
+
+      return 'other';
+    };
+
+    // 分析每个文件的角色
+    const filesToReview = segment.files;
+    const fileRoles = filesToReview.map(file => {
+      const role = inferFileType(file, context.projectType || 'flutter');
+      return {
+        path: file,
+        role: role,
+        name: path.basename(file)
+      };
+    });
+
+    // 按角色分组
+    const byRole = {
+      view: fileRoles.filter(f => f.role === 'view'),
+      controller: fileRoles.filter(f => f.role === 'controller'),
+      service: fileRoles.filter(f => f.role === 'service'),
+      api: fileRoles.filter(f => f.role === 'api'),
+      model: fileRoles.filter(f => f.role === 'model'),
+      component: fileRoles.filter(f => f.role === 'component'),
+      route: fileRoles.filter(f => f.role === 'route'),
+      config: fileRoles.filter(f => f.role === 'config'),
+      i18n: fileRoles.filter(f => f.role === 'i18n'),
+      other: fileRoles.filter(f => f.role === 'other')
+    };
+
+    // ============================================
+    // 2.5 通用组件识别
+    // ============================================
+    const isGenericComponent = (filePath, fileRole) => {
+      const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+
+      // 通用组件路径
+      const genericPaths = [
+        '/lib/components/',
+        '/lib/widgets/',
+        '/lib/elements/',
+        '/lib/ui/',
+        '/lib/shared/',
+      ];
+
+      // 通用组件名称关键词
+      const genericNames = [
+        'table', 'button', 'input', 'dropdown', 'card',
+        'modal', 'dialog', 'tooltip', 'pagination',
+        'breadcrumb', 'filter', 'search', 'form',
+        'list', 'grid', 'container', 'wrapper'
+      ];
+
+      // 路径判断
+      if (genericPaths.some(p => normalizedPath.includes(p))) {
+        return true;
+      }
+
+      // 文件名判断
+      const fileName = path.basename(filePath).toLowerCase();
+      if (genericNames.some(n => fileName.includes(n))) {
+        return true;
+      }
+
+      return false;
+    };
+
+    // 标记通用组件
+    const genericComponents = fileRoles.filter(f => isGenericComponent(f.path, f.role));
+
+    // ============================================
+    // 2. 构建代码架构概览
+    // ============================================
+    const roleDescriptions = {
+      view: '📱 View 层 (页面展示)',
+      controller: '🎮 Controller 层 (业务逻辑)',
+      service: '⚙️ Service 层 (业务服务)',
+      api: '🌐 API 层 (接口调用)',
+      model: '📦 Model 层 (数据模型)',
+      component: '🧩 Component 层 (UI组件)',
+      route: '🔀 Route 层 (路由配置)',
+      config: '⚙️ Config 层 (配置文件)',
+      i18n: '🌐 i18n 层 (多语言)',
+      other: '📄 Other 层 (其他文件)'
+    };
+
+    let architecture = `\n【代码架构概览】\n`;
+    let hasArchitecture = false;
+
+    for (const [roleKey, roleFiles] of Object.entries(byRole)) {
+      if (roleFiles.length > 0) {
+        hasArchitecture = true;
+        architecture += `\n${roleDescriptions[roleKey] || roleKey}\n`;
+        roleFiles.forEach(f => {
+          architecture += `   → ${f.name}\n`;
+        });
+      }
+    }
+
+    // ============================================
+    // 3. 构建基础提示词
+    // ============================================
+    const currentSegmentIndex = segment.index || 0;
+    const totalSegments = segment.totalSegments || 1;
+    const isIntegratedReview = segment.integrated || false;
+
+    let prompt = `你是一个资深的 QA 工程师，专注于前端代码审查。
+
+【审查目标】🎯
+**只审查前端代码（View、Controller、Component），检查是否符合需求。**
+
+⚠️ **重要原则**：
+1. **只检查前端代码**：View 层（页面）、Controller 层（业务逻辑）、Component 层（组件）
+2. **不检查后端代码**：Provider、Service、API 层只作为参考，不审查其实现
+3. **只检查代码实现**：不要评论需求本身是否清晰完整
+
+【审查重点】（按优先级）
+
+🥇 **优先级1：需求符合性检查**
+- 需求提到的功能是否已实现？
+- 是否有遗漏的功能点？
+- 实现是否完整（有头有尾，没有半成品）？
+- 实现是否有异常（逻辑错误、bug、空值处理等）？
+
+🥈 **优先级2：API 调用检查**
+- API 路径（path）是否与文档一致？
+- 请求参数是否完整、格式是否正确？
+- 响应数据处理是否正确（是否正确解析、是否处理错误情况）？
+- 是否正确处理了 API 返回的各种状态（成功、失败、空数据等）？
+
+🥉 **优先级3：代码优化建议**
+- 是否有重复代码可以抽取？
+- 是否有性能优化空间（如不必要的重渲染、大量数据分页等）？
+- 是否有更好的实现方式？
+
+❌ **不要报告**：
+- Provider/Service 层的错误处理、参数验证（这是后端职责）
+- 通用组件"缺少某功能"（通用组件通过参数控制）
+- 需求文档的问题
+
+功能点: ${(segment.features || []).join(', ')}
+
+【需求描述】
+${typeof requirements === 'string' ? requirements : JSON.stringify(requirements, null, 2)}
+`;
+
+    // ============================================
+    // 需求预处理：提取关键信息用于细节检查
+    // ============================================
+    if (reviewTasks.requirementMatching && requirements) {
+      const requirementAnalysis = this.preprocessRequirements(requirements);
+
+      if (requirementAnalysis.fields.length > 0 || Object.values(requirementAnalysis.formats).some(v => v !== null)) {
+        prompt += `\n【📋 需求关键信息提取】⬅️ 用于细节对照检查\n`;
+
+        if (requirementAnalysis.featureName) {
+          prompt += `功能名称：${requirementAnalysis.featureName}\n`;
+        }
+
+        if (requirementAnalysis.fields.length > 0) {
+          prompt += `\n✅ 必须显示的字段 (${requirementAnalysis.fields.length}个)：\n`;
+          prompt += `   ${requirementAnalysis.fields.join('、')}\n`;
+          prompt += `   ⚠️ 检查代码中是否所有这些字段都有显示\n`;
+        }
+
+        const formatItems = [];
+        if (requirementAnalysis.formats.nullValue) {
+          formatItems.push(`空值显示为 '${requirementAnalysis.formats.nullValue}'`);
+        }
+        if (requirementAnalysis.formats.dateFormat) {
+          formatItems.push(`日期格式为 '${requirementAnalysis.formats.dateFormat}'`);
+        }
+        if (requirementAnalysis.formats.dateTimeFormat) {
+          formatItems.push(`时间格式为 '${requirementAnalysis.formats.dateTimeFormat}'`);
+        }
+        if (requirementAnalysis.formats.numberFormat) {
+          formatItems.push(`数字格式为 ${requirementAnalysis.formats.numberFormat}`);
+        }
+
+        if (formatItems.length > 0) {
+          prompt += `\n⚠️ 格式要求（必须逐字对照检查）：\n`;
+          formatItems.forEach(item => {
+            prompt += `   • ${item}\n`;
+          });
+          prompt += `   ⚠️ 如果代码实现与上述格式不一致，必须报告问题！\n`;
+        }
+
+        if (requirementAnalysis.specialRules.length > 0) {
+          prompt += `\n📌 特殊显示要求：\n`;
+          requirementAnalysis.specialRules.forEach(rule => {
+            prompt += `   • ${rule.source}\n`;
+          });
+        }
+
+        prompt += `\n`;
+      }
+    }
+
+    prompt += `【审查模式】
+${isIntegratedReview ? '🔄 整体审查模式 - 你将看到本次审查的所有文件，可以进行完整的跨文件分析' : `📋 分批审查模式 - 这是第 ${currentSegmentIndex + 1}/${totalSegments} 批文件，还有后续文件需要合并分析`}
+`;
+
+    // 如果是分批审查，添加批次说明
+    if (!isIntegratedReview && totalSegments > 1) {
+      prompt += `\n【重要提示】\n`;
+      prompt += `⚠️ 本次审查只包含部分文件（第 ${currentSegmentIndex + 1} 批，共 ${totalSegments} 批）。\n`;
+      prompt += `   - 在分析问题时，请标注 "需要检查其他批次文件" 来提醒需要跨文件验证\n`;
+      prompt += `   - 不要因为当前批次没有某个文件就断定功能不存在\n`;
+      prompt += `   - 对于跨文件的调用（如 API 调用、组件引用），请标注 "需验证其他批次"\n`;
+      prompt += `\n`;
+    }
+
+    // 添加项目上下文（如果有）
+    if (projectContext) {
+      prompt += projectContext;
+    }
+
+    // 添加架构概览
+    if (hasArchitecture) {
+      prompt += architecture;
+      prompt += `\n【审查流程】\n`;
+      prompt += `请按照以下数据流向逐步理解代码：\n`;
+      if (byRole.model.length > 0) prompt += `   1️⃣ 先看 Model 层 - 理解数据结构\n`;
+      if (byRole.service.length > 0 || byRole.api.length > 0) prompt += `   2️⃣ 再看 Service/API 层 - 理解接口调用\n`;
+      if (byRole.controller.length > 0) prompt += `   3️⃣ 然后看 Controller 层 - 理解业务逻辑\n`;
+      if (byRole.view.length > 0) prompt += `   4️⃣ 最后看 View 层 - 理解页面展示\n`;
+      prompt += `\n`;
+    }
+
+    // ============================================
+    // 4. 添加文件内容（按角色顺序展示）
+    // ============================================
+    // 判断是否使用"完整代码"模式
+    // 条件：文件数量 <= 10 且 总大小 <= 50KB（安全限制，glm-4-flash 上下文 128K tokens）
+    // 50KB ≈ 65K tokens，留足够空间给提示词和响应
+    const totalSize = this.estimateTotalSize(filesToReview);
+    const useFullCodeMode = filesToReview.length <= 10 && totalSize <= 50 * 1024;
+
+    // 按角色顺序排列文件：Model → API/Service → Controller → View
+    const roleOrder = ['model', 'api', 'service', 'controller', 'view', 'component', 'route', 'config', 'i18n', 'other'];
+    const sortedFiles = [];
+    for (const role of roleOrder) {
+      sortedFiles.push(...byRole[role]);
+    }
+
+    if (useFullCodeMode) {
+      // 完整代码模式：直接发送所有代码
+      prompt += `\n【待审查文件】（共 ${filesToReview.length} 个文件，整体审查模式）\n`;
+      prompt += `✅ 你将看到本次审查的所有文件，可以进行完整的跨文件分析和依赖关系检查。\n`;
+      prompt += `💡 请重点关注：\n`;
+      prompt += `   - 跨文件的调用关系（如 API 调用、组件引用）\n`;
+      prompt += `   - 数据流向的一致性（Model → API → Controller → View）\n`;
+      prompt += `   - 相同功能在不同文件中的实现是否一致\n\n`;
+      prompt += `以下是完整的代码文件，已按架构层级排序：\n\n`;
+
+      for (const fileRole of sortedFiles) {
+        const filePath = fileRole.path;
+        console.log(`[SegmentExecutor] 传递给 AI 的文件路径: ${filePath}`);
+        try {
+          if (fs.existsSync(filePath)) {
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const fileName = fileRole.name;
+              const lineCount = content.split('\n').length;
+            const roleLabel = roleDescriptions[fileRole.role]?.split(' ')[0] || fileRole.role;
+
+            // 重要：在文件内容前添加完整路径，确保 AI 返回时能正确识别
+            prompt += `\n${roleLabel} ${fileName} (${lineCount} 行)\n`;
+            prompt += `// 文件路径: ${filePath}\n`;  // 添加完整路径
+            prompt += `${'='.repeat(60)}\n`;
+            prompt += `${content}\n\n`;
+          }
+        } catch (e) {
+          prompt += `\n[文件读取失败: ${fileRole.name} - ${e.message}]\n\n`;
+        }
+      }
+    } else {
+      // 智能切片模式：大文件才进行切片
+      prompt += `\n【待审查文件】（共 ${filesToReview.length} 个文件）\n`;
+      prompt += `注意：配置类文件（i18n、routes 等）已根据相关性进行智能切片。\n\n`;
+
+      for (const fileRole of sortedFiles) {
+        const filePath = fileRole.path;
+        try {
+          if (fs.existsSync(filePath)) {
+            const content = fs.readFileSync(filePath, 'utf-8');
+            const fileName = fileRole.name;
+            const roleLabel = roleDescriptions[fileRole.role]?.split(' ')[0] || fileRole.role;
+
+            // 使用智能切片
+            const sliced = this.codeSlicer.sliceFile(filePath, segment.features, {
+              relatedPaths: filesToReview
+            });
+
+            if (sliced.wasSliced) {
+              // 文件被切片了
+              prompt += `\n${roleLabel} ${fileName} (已切片)\n`;
+              prompt += `// 文件路径: ${filePath}\n`;  // 添加完整路径
+              prompt += `${'='.repeat(60)}\n`;
+              prompt += `原始: ${sliced.originalLines} 行 | 已切片: ${sliced.lines} 行 (${(sliced.sliceRatio * 100).toFixed(1)}%)\n`;
+              prompt += `// 以下是与"${(segment.features || []).join(', ')}"相关的代码片段\n\n`;
+              prompt += sliced.slicedContent + '\n';
+            } else {
+              // 文件不大，使用完整内容
+              prompt += `\n${roleLabel} ${fileName}\n`;
+              prompt += `// 文件路径: ${filePath}\n`;  // 添加完整路径
+              prompt += `${'='.repeat(60)}\n`;
+              prompt += `${content}\n\n`;
+            }
+          } else {
+            prompt += `\n[文件不存在: ${fileName}]\n\n`;
+          }
+        } catch (e) {
+          prompt += `\n[文件读取失败: ${fileRole.name} - ${e.message}]\n\n`;
+        }
+      }
+    }
+
+    // 添加 API 文档（如果有）
+    if (apiDocAdapter) {
+      // 根据分段的功能点查找相关 API
+      const relevantAPIs = apiDocAdapter.findAPIsByModules(segment.features);
+      if (relevantAPIs.length > 0) {
+        prompt += `\n【API 文档】用于检查页面调用 API 是否正确\n`;
+        prompt += apiDocAdapter.formatAPIsForPrompt(relevantAPIs);
+        prompt += '\n请检查：\n';
+        prompt += '- 请求方法 (GET/POST/PUT/DELETE) 是否正确\n';
+        prompt += '- 请求参数是否完整且格式正确\n';
+        prompt += '- 响应数据处理是否正确\n';
+      }
+    }
+
+    // 添加通用组件审查说明（精简版）
+    if (genericComponents.length > 0) {
+      prompt += `\n【通用组件】本次审查包含: ${genericComponents.map(c => c.name).join(', ')}\n`;
+      prompt += `⚠️ 重要: 通用组件通过参数接收配置，不应检查页面特定功能需求！\n`;
+      prompt += `   - 不检查: "缺少排序"、"缺少筛选"、"缺少分页"等功能性需求\n`;
+      prompt += `   - 只检查: 组件本身的bug、参数定义完整性、文档注释\n`;
+      prompt += `   - 通用组件的问题请使用 QA-OPT-XXX 前缀(优化建议)\n\n`;
+    }
+
+    // ========== 重要：审查限制规则 ==========
+    prompt += `
+【🚨 重要审查限制 - 必须遵守】
+
+Provider层（API/Service）严格禁止检查以下内容：
+❌ 禁止报告: "缺少错误处理"、"缺少响应数据处理"、"需要添加错误处理"
+❌ 禁止报告: "缺少参数格式校验"、"缺少数据验证"、"需要添加参数验证"
+❌ 禁止报告: 任何关于错误码处理、响应结果处理的问题
+
+Provider层只检查以下3项：
+✅ API调用方法(GET/POST/PUT/DELETE)是否正确
+✅ 请求参数与API文档是否匹配
+✅ API文档描述的参数含义与页面传输的参数是否一致
+
+通用组件严格禁止检查以下内容：
+❌ 禁止报告: "缺少排序功能"、"缺少筛选功能"、"缺少分页功能"
+❌ 禁止报告: 任何页面特定的功能需求（这些通过参数控制）
+
+通用组件只检查以下内容：
+✅ 组件本身的bug、参数定义完整性、接口文档
+
+========================================
+
+【审查要点】
+${hasArchitecture ? `
+${byRole.model.length > 0 ? `📦 Model: 字段完整性/类型/验证(数据类型约束,必填字段)` : ''}
+${byRole.service.length > 0 || byRole.api.length > 0 ? `🌐 API/Service/Provider: 只检查API调用方法、请求参数匹配、参数含义一致` : ''}
+${byRole.controller.length > 0 ? `🎮 Controller: 业务逻辑/数据转换/验证/响应处理/错误处理` : ''}
+${byRole.view.length > 0 ? `📱 View: UI正确/数据绑定/状态处理(UI状态切换,用户输入格式展示)` : ''}
+${genericComponents.length > 0 ? `🧩 通用组件: 只检查bug/参数定义，不检查页面功能` : ''}
+` : ''}
+
+【报告规则】
+1. 功能缺失: 仅当需求明确要求("必须/需要/应该"+"具体功能")才报缺失
+2. 架构优化: 验证逻辑位置问题用QA-ARCH-XXX(优化建议,非需求不符)
+3. Provider层: 不报错误处理、响应处理、参数格式校验
+
+【通用组件智能审查流程】
+
+当审查通用组件(table/pagination/dropdown/button等)时，请按以下步骤分析：
+
+第1步：分析组件接口
+   - 列出组件的所有输入参数(Props/Callbacks/Events)
+   - 例如：Pagination(pageSize, currentPage, onPageChange)
+
+第2步：追踪使用关系
+   - 找到使用该组件的父组件
+   - 检查父组件是否传递了正确的参数
+
+第3步：验证功能实现
+   - 参数驱动型(分页/筛选/排序): 检查父组件是否传递参数、API调用是否正确传递
+   - 数据展示型(表格/列表): 检查数据源是否正确、空状态是否处理
+   - 交互型(按钮/对话框): 检查事件绑定是否完整
+
+第4步：报告问题(使用以下格式)
+   ✅ 正确: "父组件XXX未传递YYY参数给组件" / "API调用未传递ZZZ参数"
+   ❌ 错误: "组件缺少XXX功能" / "需要实现YYY功能"
+
+示例: 分页组件
+   ❌ 不要报告: "缺少分页功能"
+   ✅ 应报告: "父组件调用fetchAccountList时未传递page参数"
+
+【输出格式】
+请严格按照以下 JSON 格式输出：
+
+\x60\x60\x60json
+{
+  "summary": {
+    "overallStatus": "passed|failed|partial",
+    "totalIssues": 0,
+    "comment": "综合分析总结，包括已实现的功能和存在的问题"
+  },
+  "issues": [
+    {
+      "ruleId": "QA-FUNC/ARCH/OPT/BUG/SEC-XXX",
+      "severity": "high(需求缺失/安全) / medium(部分实现/缺陷) / low(优化建议)",
+      "file": "使用代码中 // 文件路径: 后标注的完整路径",
+      "line": 行号(必须大于0，从1开始)",
+      "message": "具体问题描述",
+      "suggestion": "修复建议"
+    }
+  ]
+}
+\x60\x60\x60
+
+🚨🚨🚨 关键要求（必须遵守，否则 TODO 无法添加）🚨🚨🚨
+1. **line 字段必须是有效行号**：必须大于 0 的整数，用于在代码中添加 TODO 注释！
+2. **file 字段必须完整**：直接复制代码中 "// 文件路径:" 后的完整路径，严禁修改、猜测或转换路径格式！
+3. **不要输出空值**：不要输出 file 为空字符串或 line 等于 0，这样的问题会被系统忽略
+4. **每个问题都要有明确的文件和行号**：即使问题涉及多个文件，也要为每个文件分别创建问题条目
+
+【🚨 功能缺失时如何推断行号】
+
+当发现功能缺失时，不要设置line为0！请根据以下规则推断行号：
+
+1. 缺少API调用参数 → 找到API调用的那行代码
+2. 缺少组件参数传递 → 找到使用组件的那行代码
+3. 缺少验证逻辑 → 找到应该验证的函数/方法定义行
+4. 缺少状态处理 → 找到setState或状态变量的那行代码
+5. 缺少UI元素 → 找到最接近的build/widget方法定义行
+6. 缺少事件处理 → 找到应该绑定事件的组件/按钮那行代码
+
+推断方法：
+- 向上/向下查找相关功能的函数/类定义
+- 找到最接近问题位置的函数声明行（class/function/Widget build()等）
+- 如果找不到完全匹配的，找到最相关的函数/方法定义
+
+示例：
+- "缺少page参数" → 找到fetchAccountList()调用的那行
+- "缺少ID验证" → 找到_searchByIDChanged或搜索相关的函数定义
+- "缺少locked状态处理" → 找到状态变量定义或build方法中状态显示的地方
+
+ruleId: FUNC=功能缺失, ARCH=架构优化, OPT=一般优化, BUG=缺陷, SEC=安全
+`;
+
+    return prompt;
+  }
+
+  /**
+   * 从代码图和上下文提取文件摘要
+   * @param {string} filePath - 文件路径
+   * @param {Object} context - 上下文
+   * @returns {Object} 摘要信息
+   */
+  async extractFileSummary(filePath, context) {
+    const path = require('path');
+    const fileName = path.basename(filePath);
+    const relativePath = filePath.replace(context.projectPath + path.sep, '').replace(/\\/g, '/');
+
+    let summary = {
+      fileName,
+      filePath,
+      relativePath,
+      role: this.inferFileType(filePath, context.projectType),
+      classes: [],
+      functions: [],
+      imports: [],
+      exports: [],
+      description: '',
+      size: 0
+    };
+
+    // 1. 从代码图提取结构信息
+    if (this.codeGraphAdapter && this.codeGraphAdapter.codeGraph) {
+      const codeGraph = this.codeGraphAdapter.codeGraph;
+      const fileNode = codeGraph.nodes?.find(n => n.filePath === filePath || n.relativePath === relativePath);
+
+      if (fileNode) {
+        // 提取类信息
+        if (fileNode.children) {
+          for (const childId of fileNode.children) {
+            const child = typeof childId === 'string' ? codeGraph.nodes.find(n => n.id === childId) : childId;
+            if (!child) continue;
+
+            if (child.type === 'class') {
+              summary.classes.push({
+                name: child.name,
+                line: child.line,
+                extends: child.extends || '',
+                description: child.description || ''
+              });
+            } else if (child.type === 'function') {
+              summary.functions.push({
+                name: child.name,
+                line: child.line,
+                parameters: child.parameters || [],
+                returnType: child.returnType || ''
+              });
+            }
+          }
+        }
+
+        // 提取导入信息
+        if (fileNode.imports) {
+          for (const importId of fileNode.imports) {
+            const importNode = codeGraph.nodes.find(n => n.id === importId);
+            if (importNode) {
+              summary.imports.push({
+                from: importNode.relativePath || importNode.fileName,
+                name: importNode.name || importNode.fileName
+              });
+            }
+          }
+        }
+
+        summary.size = fileNode.size || 0;
+      }
+    }
+
+    // 2. 从 AI Context 提取描述信息
+    if (this.contextAdapter && this.contextAdapter.aiContext) {
+      const aiContext = this.contextAdapter.aiContext;
+      // aiContext 可能是对象或字符串
+      let aiContextStr = '';
+      if (typeof aiContext === 'string') {
+        aiContextStr = aiContext;
+      } else if (aiContext.raw) {
+        aiContextStr = aiContext.raw;
+      } else if (aiContext.content) {
+        aiContextStr = aiContext.content;
+      }
+
+      if (aiContextStr && (aiContextStr.includes(fileName) || aiContextStr.includes(relativePath))) {
+        // 提取相关描述（简化处理）
+        const lines = aiContextStr.split('\n');
+        for (const line of lines) {
+          if (line.includes(fileName) || line.includes(relativePath)) {
+            if (line.includes('#') || line.includes('//')) {
+              summary.description += line.trim() + '\n';
+            }
+          }
+        }
+      }
+    }
+
+    // 3. 生成可读摘要文本
+    let summaryText = `## 文件摘要: ${fileName}\n\n`;
+    summaryText += `**角色**: ${summary.role}\n`;
+    summaryText += `**路径**: ${relativePath}\n`;
+    summaryText += `**大小**: ${summary.size} bytes\n\n`;
+
+    if (summary.description) {
+      summaryText += `**描述**:\n${summary.description}\n\n`;
+    }
+
+    if (summary.classes.length > 0) {
+      summaryText += `**类定义** (${summary.classes.length}个):\n`;
+      for (const cls of summary.classes) {
+        summaryText += `- \`${cls.name}\` (行${cls.line})${cls.extends ? ` extends ${cls.extends}` : ''}\n`;
+      }
+      summaryText += '\n';
+    }
+
+    if (summary.functions.length > 0) {
+      summaryText += `**主要函数/方法** (${summary.functions.length}个):\n`;
+      for (const func of summary.functions.slice(0, 20)) { // 限制显示数量
+        summaryText += `- \`${func.name}\` (行${func.line})\n`;
+      }
+      if (summary.functions.length > 20) {
+        summaryText += `- ... 还有 ${summary.functions.length - 20} 个函数\n`;
+      }
+      summaryText += '\n';
+    }
+
+    if (summary.imports.length > 0) {
+      summaryText += `**主要导入** (${summary.imports.length}个):\n`;
+      for (const imp of summary.imports.slice(0, 10)) {
+        summaryText += `- ${imp.from}\n`;
+      }
+      if (summary.imports.length > 10) {
+        summaryText += `- ... 还有 ${summary.imports.length - 10} 个导入\n`;
+      }
+    }
+
+    summaryText += `\n⚠️ **这是文件摘要，不是完整内容。如需详细分析实现，请使用 read_file 工具。**`;
+
+    return {
+      summary: summaryText,
+      metadata: summary
+    };
+  }
+
+  /**
+   * 构建工具定义（Function Calling）
+   * 定义 AI 可以调用的工具
+   */
+  buildToolsDefinition(segment, context) {
+    const fs = require('fs');
+    const path = require('path');
+
+    // 构建三类文件列表，引导AI区分主要文件和参考文件
+    const primaryRoles = ['view', 'controller', 'api'];
+    const referenceRoles = ['model', 'binding', 'service', 'component'];
+
+    const primaryFiles = [];
+    const referenceFiles = [];
+
+    for (const filePath of segment.files) {
+      const role = this.inferFileType(filePath, context.projectType);
+      const fileName = path.basename(filePath);
+      if (primaryRoles.includes(role)) {
+        primaryFiles.push(`  ${filePath} | 角色:${role} | 文件名:${fileName}`);
+      } else if (referenceRoles.includes(role)) {
+        referenceFiles.push(`  ${filePath} | 角色:${role} | 文件名:${fileName}`);
+      }
+    }
+
+    // 从 metadata 获取共享文件列表
+    const sharedFileList = (segment.metadata && segment.metadata.sharedFiles) || [];
+    const sharedFilesStr = sharedFileList.map(f => `  ${f}`).join('\n');
+
+    const primaryList = primaryFiles.join('\n');
+    const referenceList = referenceFiles.join('\n');
+
+    const tools = [
+      {
+        type: 'function',
+        function: {
+          name: 'get_file_summary',
+          description: `获取文件的结构摘要（类名、函数签名、导入等），**用于【参考文件】和【共享文件】**。
+
+✅ **推荐使用场景**：
+- 🎯 **参考文件**（model、binding、service）- 只需了解接口和数据结构
+- 🎯 **共享/公共文件** - 只需了解对外提供的功能
+- 🎯 **组件文件**（component）- 只需了解接口和参数
+- 🎯 **快速了解文件结构** - 先看摘要再决定是否需要完整内容
+
+❌ **不要用于**：View、Controller、API 文件 → 必须用 read_file 全文读取
+
+**【参考文件】列表**（使用完整路径）：
+${referenceList}
+
+${sharedFilesStr ? `**【共享/公共文件】列表**（只需了解接口）：\n${sharedFilesStr}` : ''}`,
+          parameters: {
+            type: 'object',
+            properties: {
+              filePath: {
+                type: 'string',
+                description: '要获取摘要的文件的完整路径。直接从上述文件列表复制，不要自己构造！'
+              }
+            },
+            required: ['filePath']
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'read_file',
+          description: `读取文件的**完整内容**，只用于【主要文件】（view、controller、api）。
+
+⚠️ **使用规则**：
+- ✅ 只读取【主要文件】：View、Controller、API 层文件
+- ❌ 不要读取【参考文件】：Model、Binding、Service → 用 get_file_summary
+- ❌ 不要读取【共享文件】：公共工具/通用组件 → 用 get_file_summary
+- ❌ **同一文件只读取一次，不要重复调用**
+
+**项目根目录**：${context.projectPath || 'E:\\2025\\askey-Y25-citypark-web'}
+
+**【主要文件】列表**（必须使用 read_file 读取）：
+${primaryList}`,
+          parameters: {
+            type: 'object',
+            properties: {
+              filePath: {
+                type: 'string',
+                description: '要读取的文件的完整路径。优先使用上述【主要文件】列表中的路径。'
+              }
+            },
+            required: ['filePath']
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'read_image',
+          description: `读取 UI 设计稿图片用于视觉分析。
+
+**可用图片**：
+${context.uiImage ? `  - UI 设计稿: ${context.uiImage}` : '  (无 UI 图片)'}
+${context.figmaUrl ? `  - Figma 链接: ${context.figmaUrl}` : ''}
+
+使用此工具分析：
+- UI 布局与设计稿是否一致
+- 组件位置和大小是否正确
+- 颜色、字体、间距是否符合设计`,
+          parameters: {
+            type: 'object',
+            properties: {
+              imagePath: {
+                type: 'string',
+                description: '图片文件路径'
+              }
+            },
+            required: ['imagePath']
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'list_files_by_role',
+          description: `列出项目内指定角色的所有文件（不仅限于上述 11 个文件）。
+
+**项目根目录**：${context.projectPath || 'E:\\2025\\askey-Y25-citypark-web'}
+
+**可用角色**：model, view, controller, service, api, component, route, config, i18n, other
+
+**使用场景**：
+1. 需要查看某个架构层的所有文件
+2. 需要找到被依赖的 Provider、Model、Service 等文件
+3. 需要查看多语言文件（i18n）
+
+**提示**：
+- 此工具可以列出项目内所有符合角色的文件
+- 例如：role="model" 可列出所有 Model 文件
+- 例如：role="i18n" 可列出所有多语言文件`,
+          parameters: {
+            type: 'object',
+            properties: {
+              role: {
+                type: 'string',
+                description: '文件角色：model, view, controller, service, api, component, route, config, i18n, other',
+                enum: ['model', 'view', 'controller', 'service', 'api', 'component', 'route', 'config', 'i18n', 'other']
+              }
+            },
+            required: ['role']
+          }
+        }
+      },
+      {
+        type: 'function',
+        function: {
+          name: 'get_translations',
+          description: `获取多语言翻译文件的内容，用于验证界面文本/标签/提示信息是否与需求一致。
+
+**可用多语言文件**：
+${(segment.metadata && segment.metadata.i18nFiles && segment.metadata.i18nFiles.length > 0)
+  ? segment.metadata.i18nFiles.map(f => `  - ${f}`).join('\n')
+  : '  (未检测到，请先使用 list_files_by_role(role="i18n") 查找)'}
+
+**使用场景**：
+- 验证界面显示的文本标签是否与需求一致
+- 检查多语言文案翻译是否正确
+- 检查错误提示、按钮文字、菜单项等文本内容`,
+          parameters: {
+            type: 'object',
+            properties: {
+              filePath: {
+                type: 'string',
+                description: '多语言文件路径（可选）。不传则返回所有多语言文件的匹配结果。'
+              },
+              keys: {
+                type: 'array',
+                items: { type: 'string' },
+                description: '要查询的翻译键名列表（可选）。例如: ["l_support_password", "l_support_password_msg"]'
+              },
+              search: {
+                type: 'string',
+                description: '搜索关键词（可选）。返回键或值中包含此关键词的翻译条目。'
+              }
+            },
+            required: []
+          }
+        }
+      }
+    ];
+
+    return tools;
+  }
+
+  /**
+   * 执行工具调用
+   * @param {Object} toolCall - 工具调用对象 { id, type, function: { name, arguments } }
+   * @param {Object} segment - 当前分段
+   * @param {Object} context - 上下文
+   * @returns {Object} 工具执行结果
+   */
+  async executeToolCall(toolCall, segment, context) {
+    const fs = require('fs');
+    const path = require('path');
+    const { name, arguments: argsString } = toolCall.function;
+    // OpenAI API 返回的 arguments 是 JSON 字符串，需要解析
+    const args = typeof argsString === 'string' ? JSON.parse(argsString) : argsString;
+
+    console.log(`[SegmentExecutor] 执行工具: ${name}`, args);
+
+    try {
+      switch (name) {
+        case 'get_file_summary': {
+          const filePath = args.filePath;
+          console.log(`[SegmentExecutor] get_file_summary 工具调用，请求路径: ${filePath}`);
+
+          // 检查文件是否存在
+          const exists = fs.existsSync(filePath);
+          if (!exists) {
+            console.error(`[SegmentExecutor] 文件不存在: ${filePath}`);
+            return {
+              toolCallId: toolCall.id,
+              error: `文件不存在: ${filePath}`
+            };
+          }
+
+          // 从代码图获取文件摘要
+          const summary = await this.extractFileSummary(filePath, context);
+          console.log(`[SegmentExecutor] 获取文件摘要成功: ${path.basename(filePath)}`);
+
+          return {
+            toolCallId: toolCall.id,
+            summary: summary.summary,
+            filePath: filePath,
+            isSummary: true  // 标记这是摘要，不是完整内容
+          };
+        }
+
+        case 'read_file': {
+          const filePath = args.filePath;
+          console.log(`[SegmentExecutor] read_file 工具调用，请求路径: ${filePath}`);
+          console.log(`[SegmentExecutor] 检查文件是否存在...`);
+          const exists = fs.existsSync(filePath);
+          console.log(`[SegmentExecutor] 文件存在检查结果: ${exists}`);
+
+          if (!exists) {
+            console.error(`[SegmentExecutor] 文件不存在: ${filePath}`);
+            return {
+              toolCallId: toolCall.id,
+              error: `文件不存在: ${filePath}`
+            };
+          }
+
+          // 🎯 智能拦截：只对 component 文件使用摘要（避免上下文过大触发429）
+          // view/controller/api 是核心业务文件，必须完整读取才能检查格式
+          const fileType = this.inferFileType(filePath, context.projectType);
+          const fileStats = fs.statSync(filePath);
+          const fileSizeKB = fileStats.size / 1024;
+          const fileName = path.basename(filePath).toLowerCase();
+
+          console.log(`[SegmentExecutor] 文件类型推断: ${fileType}, 大小: ${fileSizeKB.toFixed(1)}KB`);
+
+          // 🔥 核心业务文件必须完整读取（按文件名再次检查，防止类型推断错误）
+          const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+          const isCoreFile =
+            fileType === 'view' || fileType === 'controller' || fileType === 'api' ||
+            fileName.endsWith('_controller.dart') || fileName.endsWith('_provider.dart') ||
+            fileName.endsWith('_page.dart') || fileName.endsWith('_screen.dart') ||
+            fileName.endsWith('_api.dart') || fileName.includes('controller.') ||
+            normalizedPath.includes('/views/') || normalizedPath.includes('/controllers/') ||
+            normalizedPath.includes('/api/');
+
+          // 只对非核心的 component 文件使用摘要
+          if (!isCoreFile && fileType === 'component') {
+            console.log(`[SegmentExecutor] 🎯 component 文件 (${fileSizeKB.toFixed(1)}KB)，使用摘要`);
+            const summary = await this.extractFileSummary(filePath, context);
+            return {
+              toolCallId: toolCall.id,
+              content: summary.summary,  // 用 content 字段，避免AI误解为"无法读取"
+              filePath: filePath,
+              isSummary: true,
+              _note: `⚠️ component 文件已返回签名摘要。如需完整内容分析，请明确说明。`
+            };
+          }
+
+          // 🔥 共享/公共文件：只返回摘要（减少上下文膨胀）
+          const isShared = this.isSharedFile(filePath, context.projectType);
+          if (isShared && !isCoreFile) {
+            console.log(`[SegmentExecutor] 🎯 共享文件 (${fileType}, ${fileSizeKB.toFixed(1)}KB)，返回摘要而非完整内容`);
+            const summary = await this.extractFileSummary(filePath, context);
+            return {
+              toolCallId: toolCall.id,
+              content: summary.summary,  // 用 content 字段，避免AI误解
+              filePath: filePath,
+              fileType: fileType,
+              isSummary: true,
+              _note: `此文件是公共/共享文件，已返回签名摘要。如需完整内容请说明。`
+            };
+          }
+
+          // 🔥 核心业务文件（view/controller/api）必须完整读取，不管多大
+          if (isCoreFile) {
+            console.log(`[SegmentExecutor] ✅ 核心业务文件 (${fileType}, ${fileSizeKB.toFixed(1)}KB)，完整读取`);
+          } else if (fileSizeKB > 20) {
+            console.log(`[SegmentExecutor] 大文件 (${fileSizeKB.toFixed(1)}KB)，完整读取以进行详细审查`);
+          }
+
+          const content = fs.readFileSync(filePath, "utf-8");
+          const rawLines = content.split('\n');
+
+          // 添加行号前缀，确保 AI 能准确引用行号
+          const contentWithLineNumbers = this.addLineNumbers(content);
+
+          console.log("[SegmentExecutor] read_file: " + path.basename(filePath) + " (" + rawLines.length + " lines, with line numbers)");
+
+          return {
+            toolCallId: toolCall.id,
+            content: contentWithLineNumbers,
+            filePath: filePath,
+            fileType: fileType,
+            lines: rawLines.length,
+            size: content.length
+          };
+        }
+
+        case 'read_image': {
+          const imagePath = args.imagePath || context.uiImage;
+          if (!imagePath) {
+            return {
+              toolCallId: toolCall.id,
+              error: '未提供图片路径'
+            };
+          }
+
+          // 读取图片并转换为 base64
+          if (!fs.existsSync(imagePath)) {
+            return {
+              toolCallId: toolCall.id,
+              error: `图片文件不存在: ${imagePath}`
+            };
+          }
+
+          const imageBuffer = fs.readFileSync(imagePath);
+          const ext = path.extname(imagePath).toLowerCase();
+          const mimeTypes = {
+            '.png': 'image/png',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.gif': 'image/gif',
+            '.webp': 'image/webp'
+          };
+          const mimeType = mimeTypes[ext] || 'image/png';
+          const base64 = `data:${mimeType};base64,${imageBuffer.toString('base64')}`;
+
+          console.log(`[SegmentExecutor] 读取图片: ${path.basename(imagePath)} (${imageBuffer.length} 字节)`);
+
+          return {
+            toolCallId: toolCall.id,
+            imageBase64: base64.substring(0, 50000), // 限制 base64 大小
+            imagePath: imagePath
+          };
+        }
+
+        case 'list_files_by_role': {
+          const role = args.role;
+          const filesByRole = [];
+
+          // ⚠️ 重要：只从 segment.files 中查找，不要扫描整个项目目录
+          // 扫描整个项目会返回太多文件，导致 AI 无法处理
+          for (const filePath of segment.files) {
+            const fileRole = this.inferFileType(filePath, context.projectType);
+            if (fileRole === role) {
+              filesByRole.push(filePath);
+            }
+          }
+
+          // 回退：i18n 文件通常不在 segment.files 中，从 metadata 获取
+          if (role === 'i18n' && filesByRole.length === 0 && segment.metadata && segment.metadata.i18nFiles) {
+            filesByRole.push(...segment.metadata.i18nFiles);
+            console.log(`[SegmentExecutor] list_files_by_role (i18n): 从 metadata 回退找到 ${filesByRole.length} 个文件`);
+          }
+
+          console.log(`[SegmentExecutor] list_files_by_role (${role}): 找到 ${filesByRole.length} 个文件`);
+
+          const fileList = filesByRole.map(fullPath => `  ${fullPath}`).join('\n');
+
+          return {
+            toolCallId: toolCall.id,
+            role: role,
+            count: filesByRole.length,
+            files: fileList,
+            fullPaths: filesByRole
+          };
+        }
+
+        case 'get_translations': {
+          const { filePath: requestedFilePath, keys, search } = args;
+
+          // 收集 i18n 文件路径
+          let i18nFiles = [];
+          if (segment.metadata && segment.metadata.i18nFiles && segment.metadata.i18nFiles.length > 0) {
+            i18nFiles = segment.metadata.i18nFiles;
+          } else {
+            for (const f of segment.files) {
+              if (this.inferFileType(f, context.projectType) === 'i18n') {
+                i18nFiles.push(f);
+              }
+            }
+          }
+
+          if (i18nFiles.length === 0) {
+            return {
+              toolCallId: toolCall.id,
+              error: '未找到多语言文件。项目中可能没有配置 i18n 文件。'
+            };
+          }
+
+          // 指定了单个文件路径
+          if (requestedFilePath) {
+            if (!fs.existsSync(requestedFilePath)) {
+              return { toolCallId: toolCall.id, error: `文件不存在: ${requestedFilePath}` };
+            }
+            const translations = this.parseI18nFile(requestedFilePath, context.projectType);
+            const filtered = this.filterTranslations(translations, keys, search);
+            return {
+              toolCallId: toolCall.id,
+              file: requestedFilePath,
+              language: this.detectLanguageFromPath(requestedFilePath),
+              totalKeys: translations.length,
+              matchedKeys: filtered.length,
+              translations: filtered
+            };
+          }
+
+          // 未指定文件：返回所有 i18n 文件的匹配结果
+          const allResults = [];
+          for (const i18nPath of i18nFiles) {
+            if (!fs.existsSync(i18nPath)) continue;
+            const translations = this.parseI18nFile(i18nPath, context.projectType);
+            const filtered = this.filterTranslations(translations, keys, search);
+            if (filtered.length > 0) {
+              allResults.push({
+                file: i18nPath,
+                language: this.detectLanguageFromPath(i18nPath),
+                totalKeys: translations.length,
+                matchedKeys: filtered.length,
+                translations: filtered.slice(0, 200)
+              });
+            }
+          }
+
+          console.log(`[SegmentExecutor] get_translations: 返回 ${allResults.length} 个文件的翻译`);
+
+          return {
+            toolCallId: toolCall.id,
+            files: allResults,
+            totalFiles: i18nFiles.length
+          };
+        }
+
+        default:
+          return {
+            toolCallId: toolCall.id,
+            error: `未知工具: ${name}`
+          };
+      }
+    } catch (error) {
+      console.error(`[SegmentExecutor] 工具执行失败: ${name}`, error.message);
+      return {
+        toolCallId: toolCall.id,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * 两阶段审查流程（真正按需读取文件版本）
+   *
+   * 阶段1: 需求分析 (glm-4-flash) - 确定需要审查的文件
+   * 阶段2: 代码审查 (glm-4v + Function Calling) - AI 按需读取文件
+   */
+  async checkRequirementsTwoPhase(segment, context) {
+    if (!this.llm) {
+      return {
+        issues: [],
+        summary: 'LLM 未配置，跳过 AI 分析',
+        error: 'LLM 未配置'
+      };
+    }
+
+    console.log('[SegmentExecutor] ========== 开始两阶段审查流程 ==========');
+
+    // ============================================================
+    // 阶段1: 需求分析 (glm-4) - 确定审查范围
+    // ============================================================
+    console.log('[SegmentExecutor] 阶段1: 需求分析 (glm-4)...');
+
+    const phase1Result = await this.analyzeRequirementsPhase1(segment, context);
+
+    if (!phase1Result.success) {
+      return {
+        issues: [],
+        summary: '需求分析失败: ' + (phase1Result.error || '未知错误'),
+        error: phase1Result.error
+      };
+    }
+
+    console.log('[SegmentExecutor] 阶段1完成，识别文件:', phase1Result.files.length);
+
+    // ============================================================
+    // 阶段2: 代码审查 (glm-5 + Function Calling) - 按需读取分析
+    // ============================================================
+    console.log('[SegmentExecutor] 阶段2: 代码审查 (glm-5)...');
+
+    // 更新 segment 的文件列表为阶段1识别的文件
+    const refinedSegment = {
+      ...segment,
+      files: phase1Result.files,
+      identifiedFiles: phase1Result.fileDetails
+    };
+
+    // 传递阶段1识别的相关 API 到阶段2
+    const contextWithRelatedAPIs = {
+      ...context,
+      relatedAPIs: phase1Result.relatedAPIs || [],
+      relatedAPIObjects: phase1Result.relatedAPIObjects || []
+    };
+
+    const phase2Result = await this.analyzeCodePhase2(refinedSegment, contextWithRelatedAPIs);
+
+    // 合并两个阶段的结果
+    return {
+      issues: [
+        ...(phase1Result.issues || []),
+        ...(phase2Result.issues || [])
+      ],
+      summary: this.mergeSummary(phase1Result.summary, phase2Result.summary),
+      // 新增：三维对齐结果
+      requirementMatching: phase2Result.requirementInfo || null,
+      contractChecking: phase2Result.contractChecking || null,
+      optimization: phase2Result.optimization || null,
+      phase1: phase1Result,
+      phase2: phase2Result
+    };
+  }
+
+  /**
+   * 阶段1: 需求分析
+   * 使用 glm-4 分析需求，确定需要审查的文件
+   */
+  async analyzeRequirementsPhase1(segment, context) {
+    const { requirements, projectPath, apiDocAdapter } = context;
+    const fs = require('fs');
+    const path = require('path');
+
+    console.log('[SegmentExecutor] 阶段1: 使用 glm-4 进行需求分析...');
+
+    // 获取项目中的所有文件列表
+    const allFiles = segment.files || [];
+
+    // 按角色分类文件
+    const filesByRole = { model: [], view: [], controller: [], service: [], api: [], component: [], other: [] };
+    for (const filePath of allFiles) {
+      const fileRole = this.inferFileType(filePath, context.projectType);
+      filesByRole[fileRole].push(filePath);
+    }
+
+    // 构建项目结构摘要
+    let projectStructure = '\n【项目结构】\n';
+    Object.entries(filesByRole).forEach(([roleKey, roleFiles]) => {
+      if (roleFiles.length > 0) {
+        projectStructure += `\n${roleKey.toUpperCase()} (${roleFiles.length} 个):\n`;
+        roleFiles.slice(0, 20).forEach(f => {
+          // 使用相对于项目根目录的路径，而不是只有文件名
+          const relativePath = path.relative(context.projectPath || '', f);
+          projectStructure += `  - ${relativePath}\n`;
+        });
+        if (roleFiles.length > 20) {
+          projectStructure += `  ... 还有 ${roleFiles.length - 20} 个文件\n`;
+        }
+      }
+    });
+
+    // API 文档摘要 - 传递所有 API 让 AI 分析相关性
+    let apiSummary = '';
+    if (apiDocAdapter) {
+      const stats = apiDocAdapter.getStats();
+      const allApis = apiDocAdapter.apis || [];
+
+      if (allApis.length > 0) {
+        apiSummary = `\n【API 文档】共 ${stats.totalAPIs} 个 API\n`;
+        apiSummary += `请分析以下 API，判断哪些与当前需求相关：\n\n`;
+
+        // 传递所有 API 的完整信息，让 AI 能够判断相关性
+        allApis.forEach((api, i) => {
+          apiSummary += `${i + 1}. [${api.method || 'GET'}] ${api.path} - ${api.title || '(无标题)'}\n`;
+          if (api.description) {
+            apiSummary += `   描述: ${api.description}\n`;
+          }
+        });
+
+        apiSummary += `\n请在 JSON 的 "analysis.relatedAPIs" 字段中列出与需求相关的 API 路径。`;
+      }
+    }
+
+    // 构建提示词
+    const prompt = `你是一个资深的代码审查专家。请分析以下需求，确定需要审查哪些文件。
+
+⚠️ **阶段1任务：只负责分析需求和识别文件，不报告问题！**
+
+【项目路径】
+${projectPath}
+
+${projectStructure}
+
+${apiSummary}
+
+【需求描述】
+${requirements}
+
+【任务】
+请分析上述需求，确定需要审查哪些文件和API。请仔细分析需求的每个功能点：
+
+1. **需求功能点分析**：请识别需求中的所有功能点
+   - 数据展示（列表、分页）
+   - 搜索功能
+   - 新增/创建
+   - 编辑/修改
+   - 删除
+   - 状态切换（启用、停用、锁定等）
+   - 其他操作（重置密码、解锁等）
+
+2. **API 匹配**：对每个功能点，找出对应的 API
+   - 列表展示 → GET /list 或类似
+   - 搜索 → GET /search 或 ?keyword=
+   - 新增 → POST / 或 POST /create
+   - 编辑 → PUT /:id 或 PATCH /:id
+   - 删除 → DELETE /:id
+   - 状态切换 → POST /active/:id, POST /unlock/:id 等
+
+3. **文件相关性**：找出实现这些功能的文件
+
+请严格按照以下 JSON 格式输出：
+
+\x60\x60\x60json
+{
+  "analysis": {
+    "understoodRequirements": "对需求的理解摘要",
+    "keyFeatures": ["功能1", "功能2", "..."],
+    "relatedAPIs": ["API路径1", "API路径2", "..."]
+  },
+  "filesToReview": [
+    {
+      "path": "完整文件路径",
+      "name": "文件名",
+      "role": "view|controller|model|service|component|api",
+      "reason": "选择此文件的原因",
+      "priority": "high|medium|low"
+    }
+  ]
+}
+\x60\x60\x60
+
+🚨 **重要提醒**：
+- 阶段1只负责分析需求和识别文件，**不要报告任何问题**
+- 不要评论需求是否清晰完整
+- 不要评论 API 文档是否详细
+- 所有问题报告将在阶段2（代码审查）进行
+
+注意：
+- 只选择真正需要审查的文件（优先 high 和 medium）
+- 文件路径必须是上述项目结构中列出的完整路径
+- **重要**：请仔细匹配需求中的每个功能点，不要遗漏任何相关的 API
+- relatedAPIs 必须包含所有与需求相关的 API 路径（如 /users, /users/:id, /login, /search 等）
+
+**API 匹配示例**：
+- 需求提到"新增"、"创建" → 匹配 POST / 或 POST /create
+- 需求提到"编辑"、"修改" → 匹配 PUT /:id 或 PATCH /:id
+- 需求提到"删除" → 匹配 DELETE /:id
+- 需求提到"搜索" → 匹配 GET /search 或带 ?keyword= 的 API
+- 需求提到"列表"、"所有" → 匹配 GET / 或 GET /list
+- 需求提到"状态"、"启用/停用/锁定" → 匹配 /active/, /unlock/, /status/ 等
+`;
+
+    try {
+      // 使用智能模型选择和重试机制进行需求分析
+      const phase1Config = QAModelConfig.getTwoPhaseConfig(1);
+      console.log(`[SegmentExecutor] 阶段1 使用模型: ${phase1Config.preferred}`);
+
+      const response = await this.callLLMWithRetry('code_analysis', [
+        { role: 'system', content: '你是一个资深的代码审查专家，擅长分析需求并确定审查范围。' },
+        { role: 'user', content: prompt }
+      ], {
+        model: phase1Config.preferred,
+        temperature: phase1Config.temperature,
+        maxTokens: phase1Config.maxTokens,
+        enableModelFallback: true  // 启用自动模型回退
+      });
+
+      if (!response.success) {
+        // 如果是因为取消而失败
+        if (response.cancelled) {
+          return {
+            success: false,
+            error: '用户取消',
+            cancelled: true
+          };
+        }
+        return {
+          success: false,
+          error: response.error || '需求分析失败'
+        };
+      }
+
+      // 解析响应
+      const parsed = this.parseJSONResponse(response.content);
+
+      if (!parsed || !parsed.filesToReview) {
+        console.warn('[SegmentExecutor] 阶段1 响应解析失败，使用默认文件列表');
+        return {
+          success: true,
+          files: segment.files,
+          fileDetails: segment.files.map(f => ({ path: f, name: path.basename(f), role: 'unknown', reason: '默认包含', priority: 'medium' })),
+          issues: [],
+          summary: '需求分析完成（使用默认文件列表）'
+        };
+      }
+
+      console.log('[SegmentExecutor] 阶段1 识别文件:', parsed.filesToReview.map(f => `${f.name} (${f.priority})`).join(', '));
+
+      // 提取 AI 识别的相关 API
+      const aiRelatedAPIs = parsed.analysis?.relatedAPIs || [];
+      if (aiRelatedAPIs.length > 0) {
+        console.log('[SegmentExecutor] 阶段1 AI 识别相关 API:', aiRelatedAPIs.join(', '));
+      }
+
+      // 根据 AI 识别的 API 路径，从 API 文档中获取完整的 API 对象
+      const relatedAPIObjects = [];
+      if (aiRelatedAPIs.length > 0 && apiDocAdapter) {
+        const allApis = apiDocAdapter.apis || [];
+        aiRelatedAPIs.forEach(apiPath => {
+          const api = allApis.find(a => a.path === apiPath || a.path.endsWith(apiPath) || apiPath.endsWith(a.path));
+          if (api) {
+            relatedAPIObjects.push(api);
+          }
+        });
+        console.log(`[SegmentExecutor] 找到 ${relatedAPIObjects.length} 个完整的 API 对象`);
+      }
+
+      return {
+        success: true,
+        files: parsed.filesToReview.map(f => f.path),
+        fileDetails: parsed.filesToReview,
+        relatedAPIs: aiRelatedAPIs,  // 传递 AI 识别的 API 路径列表
+        relatedAPIObjects: relatedAPIObjects,  // 传递完整的 API 对象
+        issues: [],  // 阶段1不报告问题，只分析需求和识别文件
+        summary: parsed.analysis?.understoodRequirements || '需求分析完成',
+        analysis: parsed.analysis
+      };
+
+    } catch (error) {
+      console.error('[SegmentExecutor] 阶段1 分析失败:', error.message);
+      return {
+        success: false,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * 阶段2: 代码审查（AI 按需读取文件）
+   * 使用 glm-4v + Function Calling
+   */
+  async analyzeCodePhase2(segment, context) {
+    const { requirements, projectPath, apiDocAdapter, dimensions } = context;
+    const fs = require('fs');
+    const path = require('path');
+
+    console.log('[SegmentExecutor] 阶段2: 使用 glm-5 进行代码审查...');
+    console.log('[SegmentExecutor] 阶段2 dimensions 参数:', dimensions);
+    console.log('[SegmentExecutor] 阶段2 dimensions 类型:', Array.isArray(dimensions) ? 'Array' : typeof dimensions);
+
+    // 生成审查任务配置（修复：添加 dimensions 参数处理）
+    const reviewTasks = this.generateReviewTasks(dimensions || {});
+    console.log('[SegmentExecutor] 阶段2 reviewTasks 已定义:', reviewTasks);
+
+    // 检查是否启用 Function Calling
+    // 如果用户使用的是 Coding Plan 端点，则不使用 tools
+    const useFunctionCalling = context.useFunctionCalling !== false;
+    const tools = useFunctionCalling ? this.buildToolsDefinition(segment, context) : null;
+
+    if (!useFunctionCalling) {
+      console.log('[SegmentExecutor] Function Calling 已禁用，使用 Coding Plan 端点（一次性发送所有代码）');
+    } else {
+      console.log('[SegmentExecutor] Function Calling 已启用，使用标准端点（AI 按需读取文件）');
+    }
+
+    // 构建项目结构摘要（只发送文件列表，不发送代码）
+    let projectStructure = '\n【待审查文件】\n';
+    if (segment.identifiedFiles) {
+      segment.identifiedFiles.forEach(f => {
+        // 使用相对于项目根目录的路径
+        const relativePath = path.relative(projectPath || '', f.path || String(f));
+        projectStructure += `  - ${relativePath} (${f.role}) - ${f.reason} - 优先级: ${f.priority}\n`;
+      });
+    } else {
+      segment.files.forEach(f => {
+        const fileRole = this.inferFileType(f, context.projectType);
+        // 使用相对于项目根目录的路径
+        const relativePath = path.relative(projectPath || '', f);
+        projectStructure += `  - ${relativePath} (${fileRole})\n`;
+      });
+    }
+
+    // API 文档摘要 - 使用阶段1识别的相关 API
+    let apiSummary = '';
+    if (apiDocAdapter) {
+      const allApis = apiDocAdapter.apis || [];
+      // 优先使用阶段1传递的完整 API 对象
+      const relatedAPIObjects = context.relatedAPIObjects || [];
+      const relatedAPIPaths = context.relatedAPIs || [];
+
+      if (relatedAPIObjects.length > 0) {
+        // 使用阶段1识别的完整 API 对象
+        console.log(`[SegmentExecutor] 使用阶段1识别的 ${relatedAPIObjects.length} 个相关 API`);
+        apiSummary = '\n【相关 API 文档】\n';
+
+        relatedAPIObjects.forEach((api, i) => {
+          apiSummary += `  ${i + 1}. [${api.method || 'GET'}] ${api.path} - ${api.title || '(无标题)'}\n`;
+          if (api.description) {
+            const shortDesc = api.description.length > 80
+              ? api.description.substring(0, 80) + '...'
+              : api.description;
+            apiSummary += `     描述: ${shortDesc}\n`;
+          }
+        });
+      } else if (relatedAPIPaths.length > 0) {
+        // 使用 API 路径查找（向后兼容）
+        console.log(`[SegmentExecutor] 使用阶段1识别的 ${relatedAPIPaths.length} 个相关 API 路径`);
+        apiSummary = '\n【相关 API 文档】\n';
+
+        relatedAPIPaths.forEach((apiPath, i) => {
+          const api = allApis.find(a => a.path === apiPath || a.path.endsWith(apiPath));
+          if (api) {
+            apiSummary += `  ${i + 1}. [${api.method || 'GET'}] ${api.path} - ${api.title || '(无标题)'}\n`;
+          }
+        });
+      } else {
+        // 没有相关 API 信息，显示前 17 条
+        console.log('[SegmentExecutor] 阶段1 未识别相关 API，使用前 17 条 API');
+        apiSummary = '\n【相关 API 文档】\n';
+        allApis.slice(0, 17).forEach((api, i) => {
+          apiSummary += `  ${i + 1}. [${api.method || 'GET'}] ${api.path} - ${api.title || '(无标题)'}\n`;
+        });
+      }
+    }
+
+    // 读取文件内容（用于 Coding Plan 模式）
+    let codeContent = '';
+    if (!useFunctionCalling) {
+      console.log('[SegmentExecutor] 读取文件内容（Coding Plan 模式）...');
+      const filesToRead = segment.identifiedFiles || segment.files.map(f => ({
+        path: f,
+        name: path.basename(f),
+        role: this.inferFileType(f, context.projectType)
+      }));
+
+      for (const file of filesToRead.slice(0, 5)) { // 限制最多 5 个文件
+        let filePath;
+        try {
+          filePath = typeof file === 'string' ? file : file.path;
+          const content = fs.readFileSync(filePath, "utf-8");
+          const contentWithLines = this.addLineNumbers(content);
+          const truncatedContent = contentWithLines.length > 4000 ? contentWithLines.substring(0, 4000) + String.fromCharCode(10) + "... (truncated)" : contentWithLines;
+          codeContent += `
+
+// ===== ${path.basename(filePath)} =====
+${truncatedContent}
+`;
+          console.log(`[SegmentExecutor] 已读取: ${path.basename(filePath)} (${content.length} 字符)`);
+        } catch (error) {
+          const fileName = filePath || path.basename(String(file));
+          console.warn(`[SegmentExecutor] 无法读取文件: ${fileName}`, error.message);
+        }
+      }
+    }
+
+    // Coding Plan 模式：追加 i18n 文件内容
+    if (!useFunctionCalling && segment.metadata && segment.metadata.i18nFiles && segment.metadata.i18nFiles.length > 0) {
+      codeContent += '\n\n// ===== I18N / 多语言翻译文件 =====\n';
+      for (const i18nPath of segment.metadata.i18nFiles) {
+        try {
+          if (fs.existsSync(i18nPath)) {
+            const translations = this.parseI18nFile(i18nPath, context.projectType);
+            const langCode = this.detectLanguageFromPath(i18nPath);
+            const displayTranslations = translations.slice(0, 150);
+            codeContent += `\n// --- ${path.basename(i18nPath)} (${langCode}, ${translations.length} keys, showing first ${displayTranslations.length}) ---\n`;
+            for (const t of displayTranslations) {
+              codeContent += `// "${t.key}": "${t.value}"\n`;
+            }
+            if (translations.length > 150) {
+              codeContent += `// ... (${translations.length - 150} more keys omitted)\n`;
+            }
+          }
+        } catch (err) {
+          console.warn(`[SegmentExecutor] 无法读取 i18n 文件: ${i18nPath}`, err.message);
+        }
+      }
+      codeContent += '\n// ⚠️ 如需验证界面文本，请对照上述多语言翻译内容。\n';
+    }
+
+    // 构建系统提示
+    let systemPrompt = `你是一个资深的 QA 工程师，专注于前端代码审查。`;
+
+    if (useFunctionCalling) {
+      // Function Calling 模式提示
+      systemPrompt += `
+
+⚠️ **核心原则：完整理解需求，严格对照代码检查！**
+
+【审查范围】
+- ✅ 审查：View 层（页面）、Controller 层（业务逻辑）、Component 层（组件）
+- ❌ 不审查：Provider/Service/API 层的实现（只作为参考）
+- ❌ 不评论：需求文档是否清晰完整
+
+【审查重点】（按优先级）
+
+🥇 **优先级1：需求符合性检查**
+- 需求提到的功能是否已实现？
+- 是否有遗漏的功能点？
+- 实现是否完整（有头有尾，没有半成品）？
+- 实现是否有异常（逻辑错误、bug、空值处理等）？
+- ⚠️ **格式检查**：需求中提到的任何格式要求（空值显示、日期格式、文本内容等），代码是否完全一致？
+
+🥈 **优先级2：API 调用检查**
+- API 路径（path）是否与文档一致？
+- 请求参数是否完整、格式是否正确？
+- 响应数据处理是否正确（是否正确解析、是否处理错误情况）？
+- 是否正确处理了 API 返回的各种状态（成功、失败、空数据等）？
+
+🥉 **优先级3：代码优化建议**
+- 是否有重复代码可以抽取？
+- 是否有性能优化空间（如不必要的重渲染、大量数据分页等）？
+- 是否有更好的实现方式？
+
+【格式要求检查】（特别重要）
+当需求中出现以下关键词时，必须检查代码格式是否正确：
+- "显示为"、"呈现为"、"需要为" → 检查显示内容是否完全一致
+- "格式:"、"格式为" → 检查日期/时间/数字格式是否正确
+- "XX时显示XX" → 检查条件显示逻辑是否正确
+- 任何带具体值的要求 → 检查代码中是否使用了相同的值
+
+⚠️ **例如**：
+- 需求说"空值显示为 --"，代码就必须用 --，不能用 - 或空字符串
+- 需求说"格式: YYYY-MM-DD"，代码就必须按这个格式化，不能用民国年或其他格式
+- 需求说"显示'已完成'"，代码就不能显示"完成"
+
+🚨 **格式检查必须严格对照需求，逐字比对！**
+- ✅ **必须报告**：需求明确要求某个值/格式，但代码使用了不同的值/格式
+- ✅ **必须报告**：需求明确要求显示某个字段，但页面/表格缺少此列
+- ✅ **必须报告**：需求明确要求的日期/时间/数字格式，但代码使用了不同格式
+- 📋 **检查方法**：
+  1. 从需求文档中提取所有带具体值的格式要求（如"空值显示为XX"、"格式:XX"、"显示XX时XX"等）
+  2. 在代码中查找对应的实现（格式化函数、数据绑定、UI 组件等）
+  3. 逐字比对需求值和代码值，任何不一致都必须报告
+  4. **必须使用 get_translations 工具**验证多语言文案：检查到涉及界面文本/标签/提示信息时，必须调用 get_translations 获取对应的多语言翻译进行比对
+
+🚨 **重要区分：显示内容 vs API 字段名**
+- ✅ **需要检查**：页面显示的文本、标签、提示信息（如表格列头"用户ID"、"账号"等）
+- ❌ **不要检查**：后端 API 字段名（如 userId、userName、accountId 等）
+- 📋 **原则**：
+  - 需求描述的是"用户看到什么" → 显示内容需符合需求
+  - API 文档定义的是"数据结构" → 字段名以后端文档为准
+  - 前端代码调用 API 时使用后端定义的字段名（userId）是**正确的**
+  - 只有当需求明确要求显示某个字段内容时，才检查显示值是否正确
+
+❌ **错误示例**（不要这样报告）：
+- 需求说"显示用户ID"，API 字段是 userId → ✅ 这是正确的！不要报告"字段名不一致"
+- 需求说"显示账号"，API 字段是 account → ✅ 这是正确的！不要报告格式错误
+
+✅ **正确检查**：
+- 需求说"空值显示为 --" → 检查页面是否显示 --（而不是检查 API 字段名）
+- 需求说"日期格式为 YYYY-MM-DD" → 检查页面显示的日期格式（而不是检查 API 传来的原始格式）
+
+【工作模式】🔧 **按需读取模式**
+你有以下工具可以主动读取文件内容：
+1. **read_file** - 读取文件完整内容（必须使用完整路径）
+2. **read_image** - 读取 UI 设计稿
+3. **list_files_by_role** - 列出指定角色的所有文件
+4. **get_translations** - 获取多语言翻译文件内容，验证界面文本/标签/提示信息是否与需求一致
+
+【审查流程】
+1. **仔细阅读需求** - 从【需求描述】中提取所有要求（功能、字段、格式、行为）
+2. **读取前端代码** - 使用 read_file 工具读取 View、Controller、Component 层的文件
+3. **逐条对照检查** - 检查代码实现是否与需求完全一致
+4. **验证多语言文案** - 当涉及界面文本时，必须使用 get_translations 工具获取翻译键值进行比对
+5. **输出结果** - 以 JSON 格式输出问题列表
+
+🚨 **强制要求（违反将被拒绝）**：
+
+⚠️⚠️⚠️ **【最重要】必须全文读取 View、Controller、API 文件** ⚠️⚠️⚠️
+
+以下三类文件**必须使用 read_file 工具读取完整内容**，绝对不能跳过：
+1. **Controller 层**（controller/）→ 全文读取，检查响应数据处理
+2. **API 层**（api/）→ 全文读取，检查 API 调用
+3. **View 层**（view/）→ 全文读取，检查页面显示
+
+❌ **禁止行为**：
+- 只读取 Component 文件，跳过 Controller/API/View
+- 只用 get_file_summary 查看 Controller/API/View
+- 没有读取完这三个层的文件就报告问题
+
+✅ **正确流程**（必须严格遵守）：
+1. 先用 list_files_by_role 获取 controller/api/view 文件列表
+2. **立即**对每个返回的文件使用 read_file 全文读取（不要等待！）
+3. 读取完所有三层文件后，开始检查并报告问题
+
+⚠️ **关键提示**：
+- list_files_by_role 返回的文件是**当前审查范围内**的文件，数量有限
+- 收到文件列表后，**必须立即**使用 read_file 逐个读取
+- 不要等待进一步的指令，不要跳过任何文件
+
+**Controller 层必须检查的内容（最高优先级）**：
+
+⚠️⚠️⚠️ **所有数据处理方法都必须检查！** ⚠️⚠️⚠️
+
+在 Controller 中，任何对数据进行转换、格式化、处理的方法都需要检查，包括但不限于：
+- formatDate、formatNumber、formatXXX
+- processData、transformData、convertXXX
+- map、reduce、filter 等数据转换操作
+- 任何对 API 响应数据进行处理的代码
+
+**检查方法**：
+1. **识别所有数据处理方法**（不要遗漏任何方法）
+2. **从需求中提取格式要求**（空值、日期、数字、文本等格式）
+3. **检查代码实现**：实际返回/处理的是什么值
+4. **逐字比对**：需求值 vs 代码实际值
+5. **发现不一致必须报告**
+
+**常见检查项**（示例，实际按需求文档检查）：
+- 空值处理：需求说显示"A"，代码返回"B" → 报告
+- 日期格式：需求说"公元年YYYY-MM-DD"，代码用民国年 → 报告
+- 数字格式：需求说千分位"1,000"，代码显示"1000" → 报告
+- 文本内容：需求说显示"登录"，代码显示"登入" → 报告
+
+⚠️ **Controller 层审查流程**：
+1. 遍历 Controller 文件中的所有方法
+2. 对每个处理数据的方法，检查是否符合需求格式要求
+3. 重点检查：空值分支、日期格式化、数字格式化、任何数据转换
+
+⚠️⚠️⚠️ **【最重要】三层联合检查流程** ⚠️⚠️⚠️
+**必须联合检查 View + Controller + API 三层，确保数据流向正确**：
+
+1. **数据流向检查**（API → Controller → View）：
+   - API 返回什么字段？（在 API 层查看）
+   - Controller 如何处理这些字段？（在 Controller 层查看）
+   - View 如何显示这些字段？（在 View 层查看）
+   - 三层之间字段名、数据类型是否一致？
+
+2. **格式化检查**（重点！容易出错）：
+   - API 返回原始数据（如 "2024-01-01T00:00:00"）
+   - Controller 格式化后（如 "2024/01/01" 或 "113/01/01" 民国年）
+   - View 最终显示什么？
+   - 与需求比对：需求要求什么格式？代码实际是什么格式？
+
+3. **空值处理检查**：
+   - API 返回 null/空字符串时
+   - Controller 如何处理？（返回 "-" 还是 "--" 还是空字符串？）
+   - View 最终显示什么？
+   - 与需求比对：需求要求空值显示什么？
+
+4. **API 路径和参数检查**（只在 API 层检查）：
+   - ⚠️ **只检查 path 部分**：如 \`/user?page=1\`，不包括 environment 变量
+   - ⚠️ **不要检查**：\`environment.accountUrl\`、\`environment.baseUrl\` 等环境变量
+   - 请求参数字段名：传给后端的字段名是否与 API 文档一致？
+   - ⚠️ **字段名检查**：检查的是"传给后端的字段名"，不是"需求中的字段名"
+
+5. **职责分离原则**（避免误报）：
+   - **API 层**：只负责发送请求、接收响应，不负责参数验证、错误处理
+   - **Controller 层**：负责数据处理、格式化、错误处理
+   - **View 层**：负责显示、用户交互、**表单验证**（邮箱、手机号等格式验证在 View 层处理）
+
+❌ **错误报告示例**（不要这样报告）：
+- "API 层缺少参数格式验证" → ✅ 参数验证在 View 层处理，不是 API 层的职责
+- "API 层缺少错误处理" → ✅ 错误处理在 Controller 层，不是 API 层的职责
+- "API 路径使用了 environment.accountUrl" → ✅ 这是正确的，不要检查环境变量部分
+- "请求参数 userId 与需求描述字段名不一致" → ✅ 检查的是传给后端的字段名，不是需求中的名称
+
+⚠️⚠️⚠️ **行号要求（最高优先级）** ⚠️⚠️⚠️
+- **每个问题必须包含准确的行号（line > 0）**
+- **绝对不允许输出 line = 0、line = null 或省略 line 字段**
+- 使用 read_file 读取文件后，文件内容会显示行号
+- 问题在哪一行，line 就填那一行的数字
+- **如果无法确定行号，宁可不要报告这个问题！**
+
+❌ **错误示例（无效）**：
+- { "ruleId": "QA-001", "line": 0, ... }  ← 行号为0，无效！
+- { "ruleId": "QA-002", "line": null, ... }  ← 行号为null，无效！
+- { "ruleId": "QA-003", ... }  ← 没有line字段，无效！
+
+✅ **正确示例（有效）**：
+- { "ruleId": "QA-001", "line": 47, "file": "...", ... }  ← 有效
+- { "ruleId": "QA-002", "line": 153, "file": "...", ... }  ← 有效
+
+- **只评论你通过工具获取的信息，不要猜测或推断**
+- **禁止报告"需求不明确"、"API 文档不清楚"等问题**
+
+【项目信息】
+- 项目路径: ${projectPath}
+- 审查功能: ${(segment.features || []).join(', ')}
+
+${projectStructure}
+
+${apiSummary}
+
+【需求描述】
+${requirements}`;
+
+    // ============================================
+    // 需求预处理：提取关键信息用于细节检查
+    // ============================================
+    if (reviewTasks.requirementMatching && requirements) {
+      console.log('[SegmentExecutor] 阶段2: 开始需求预处理...');
+      const requirementAnalysis = this.preprocessRequirements(requirements);
+
+      const hasFields = requirementAnalysis.fields.length > 0;
+      const hasFormats = Object.values(requirementAnalysis.formats).some(v => v !== null);
+      console.log('[SegmentExecutor] 阶段2: 预处理结果 - hasFields:', hasFields, 'hasFormats:', hasFormats);
+      console.log('[SegmentExecutor] 阶段2: formats:', JSON.stringify(requirementAnalysis.formats));
+
+      if (hasFields || hasFormats) {
+        console.log('[SegmentExecutor] 阶段2: 添加需求关键信息到 prompt...');
+        systemPrompt += `\n\n【📋 需求关键信息提取】⬅️ 用于细节对照检查\n`;
+        systemPrompt += `⚠️ 以下是从需求中提取的关键信息，请重点检查。\n`;
+        systemPrompt += `⚠️ 但仍需完整阅读【需求描述】，确保不遗漏任何细节！\n`;
+
+        if (requirementAnalysis.featureName) {
+          systemPrompt += `\n功能名称：${requirementAnalysis.featureName}\n`;
+        }
+
+        if (requirementAnalysis.fields.length > 0) {
+          systemPrompt += `\n✅ 必须显示的字段 (${requirementAnalysis.fields.length}个)：\n`;
+          systemPrompt += `   ${requirementAnalysis.fields.join('、')}\n`;
+          systemPrompt += `   ⚠️ 检查代码中是否所有这些字段都有显示\n`;
+        }
+
+        const formatItems = [];
+        if (requirementAnalysis.formats.nullValue) {
+          formatItems.push(`空值显示为 '${requirementAnalysis.formats.nullValue}'`);
+        }
+        if (requirementAnalysis.formats.dateFormat) {
+          formatItems.push(`日期格式为 '${requirementAnalysis.formats.dateFormat}'`);
+        }
+        if (requirementAnalysis.formats.dateTimeFormat) {
+          formatItems.push(`时间格式为 '${requirementAnalysis.formats.dateTimeFormat}'`);
+        }
+        if (requirementAnalysis.formats.numberFormat) {
+          formatItems.push(`数字格式为 ${requirementAnalysis.formats.numberFormat}`);
+        }
+
+        if (formatItems.length > 0) {
+          systemPrompt += `\n⚠️ 格式要求（必须逐字对照检查）：\n`;
+          formatItems.forEach(item => {
+            systemPrompt += `   • ${item}\n`;
+          });
+          systemPrompt += `   ⚠️ 如果代码实现与上述格式不一致，必须报告问题！\n`;
+        }
+
+        systemPrompt += `\n`;
+      }
+    }
+
+    // 继续添加输出格式要求
+    systemPrompt += `
+
+【审查任务】（五维对齐审查架构）
+
+**维度 1: Requirement Matching（需求匹配）** ${reviewTasks.requirementMatching ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.requirementMatching ? `请对照需求检查代码实现，特别关注：
+• 需求中明确提到的"显示"、"格式"、"呈现"、"为"等关键词
+• 例如：需求说"空值显示为 --"，代码就必须用 --，不能用 - 或空字符串
+• 例如：需求说"格式: YYYY-MM-DD"，代码就不能用民国年或其他格式
+• 例如：需求说"保留2位小数"，代码就不能是整数格式
+• 任何与需求描述不一致的地方，即使功能"能用"，也必须报告！` : ''}
+
+**维度 2: Contract Checking（契约检查）** ${reviewTasks.contractChecking ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.contractChecking ? `- apiCall: API 路径、HTTP 方法是否与文档一致
+- params: 请求参数是否完整、格式是否正确
+- response: 响应数据处理是否正确（格式化、错误码处理）` : ''}
+
+**维度 3: Robustness Checking（健壮性检查）** ${reviewTasks.robustnessChecking ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.robustnessChecking ? `- errorHandling: try-catch 覆盖、错误提示、降级/重试机制
+- boundaryValidation: 空值检查、数组越界、数值范围、长度验证
+- dataValidation: 类型检查、格式验证（日期、邮箱等）、必填字段
+- resourceManagement: useEffect 清理、定时器清除、监听器释放` : ''}
+
+**维度 4: Security Checking（安全检查）** ${reviewTasks.securityChecking ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.securityChecking ? `- inputSecurity: XSS 防护（dangerouslySetInnerHTML）、输入过滤、注入防护
+- dataSecurity: 敏感信息脱敏、密钥硬编码检查、本地存储安全
+- authSecurity: 权限校验、Token/Session 管理、CSRF 防护` : ''}
+
+**维度 5: Accessibility（无障碍性）** ${reviewTasks.optimization ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.optimization ? `- ariaSupport: 无障碍标签、语义化、屏幕阅读器兼容
+- keyboardNav: 键盘导航、焦点管理、Tab 顺序
+- colorContrast: 颜色对比度、文字可读性` : ''}
+
+**维度 6: Compatibility（兼容性）** ${reviewTasks.optimization ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.optimization ? `- browserCompat: 跨浏览器、API 兼容性
+- responsive: 响应式适配、不同屏幕尺寸
+- i18n: 多语言支持、文本方向、日期格式` : ''}
+
+**维度 7: Performance（性能）** ${reviewTasks.optimization ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.optimization ? `- renderOpt: 渲染优化、不必要重建、大列表
+- resourceMgmt: 内存泄漏、定时器清理、Controller dispose
+- networkOpt: 重复请求、缓存策略` : ''}
+
+**维度 8: Maintainability（可维护性）** ${reviewTasks.optimization ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.optimization ? `- codeStructure: 组件拆分、重复代码、命名规范
+- naming: 方法名/变量名/类名拼写检查（如 handel→handle、recieve→receive 等常见拼写错误必须报告）
+- errorHandling: 统一错误处理模式、日志记录
+- readability: 注释完整性、复杂度控制` : ''}
+
+【输出格式】
+完成分析后，请严格按照以下 JSON 格式输出：
+
+\x60\x60\x60json
+{
+  "summary": {
+    "overallStatus": "passed|failed|partial",
+    "totalIssues": 0,
+    "dimensionScores": {
+      "requirementMatching": 100,
+      "contractChecking": 75,
+      "robustnessChecking": 55,
+      "securityChecking": 70,
+      "optimization": 72
+    },
+    "overallScore": 74.4,
+    "comment": "审查总结"
+  }${this.buildJsonFields(reviewTasks)}
+}
+\x60\x60\x60
+
+📝 **输出要求**：
+• 每个问题必须包含准确的 file（完整路径）和 line（行号）
+• message 必须明确指出代码与需求的哪一部分不符
+• suggestion 必须提供具体的修复建议
+
+❌ **不要报告的问题**：
+- 不要评论需求本身是否清晰完整
+- 不要评论文档是否详细
+- 只检查代码实现是否符合需求描述
+`;
+    }
+
+    // Coding Plan 模式提示
+    if (!useFunctionCalling) {
+      systemPrompt += `
+
+【工作模式】📄 **代码审查模式**
+你将收到完整的代码内容，请仔细阅读并进行审查。
+
+${projectStructure}
+
+${apiSummary}
+
+【需求描述】
+${requirements}
+
+【任务】（五维对齐审查架构）
+請執行以下審查任務：
+
+**维度 1: Requirement Matching（需求對齊）** ${reviewTasks.requirementMatching ? '✓' : '✗'}
+${reviewTasks.requirementMatching ? `⚠️ **細節檢查要求**（必須逐字對照需求）：
+• **功能完整性**：需求提到的功能是否都已實現
+• **顯示字段檢查**：需求要求的字段是否都有顯示
+• **格式要求檢查**：需求中明確提到的格式是否正確實現
+  - 空值顯示格式（如：需求說顯示 '--'，代碼就不能是 '-'）
+  - 日期/時間格式（如：需求說 'YYYY-MM-DD'，代碼就必須按這個格式化）
+  - 數字格式（如：需求說保留2位小數，代碼就不能是整數）
+  - 文本內容（如：需求說顯示"已完成"，代碼就不能是"完成"）
+• **數據處理檢查**：需求提到的數據處理是否正確實現
+
+📋 **檢查方法**：
+1. 逐字閱讀需求，提取所有"顯示"、"格式"、"呈現"類的要求
+2. 在代碼中搜索對應的實現（如 ?? ''、.format()、toString() 等）
+3. 對照需求，檢查是否完全一致
+4. 如果不一致，必須報告問題（即使功能"能用"）
+5. **多語言文案檢查**：在【代碼內容】的"I18N/多語言翻譯文件"部分查找翻譯鍵值，驗證代碼中使用的翻譯鍵是否與需求文本一致。如發現不一致，必須報告問題。
+
+⚠️ **重要**：不要因為"功能能用"就忽略格式要求！` : ''}
+
+**维度 2: Contract Checking（契約檢查）** ${reviewTasks.contractChecking ? '✓' : '✗'}
+${reviewTasks.contractChecking ? `- apiCall: API 路徑、HTTP 方法是否與文檔一致
+- params: 請求參數是否完整、格式是否正確
+- response: 常應數據處理是否正確（格式化、錯誤碼處理）` : ''}
+
+**维度 3: Robustness Checking（健壯性檢查）** ${reviewTasks.robustnessChecking ? '✓' : '✗'}
+${reviewTasks.robustnessChecking ? `- errorHandling: try-catch 覆蓋、錯誤提示、降級/重試機制
+- boundaryValidation: 空值檢查、數組越界、數值範圍、長度驗證
+- dataValidation: 類型檢查、格式驗證（日期、郵箱等）、必填字段
+- resourceManagement: useEffect 清理、定時器清除、監聽器釋放` : ''}
+
+**维度 4: Security Checking（安全檢查）** ${reviewTasks.securityChecking ? '✓' : '✗'}
+${reviewTasks.securityChecking ? `- inputSecurity: XSS 防護（dangerouslySetInnerHTML）、輸入過濾、注入防護
+- dataSecurity: 敏感信息脫敏、密鑰硬編碼檢查、本地存儲安全
+- authSecurity: 權限校驗、Token/Session 管理、CSRF 防護` : ''}
+
+**维度 5: Optimization（優化建議）** ${reviewTasks.optimization ? '✓' : '✗'}
+${reviewTasks.optimization ? `- codeStructure: 組件拆分、重複代碼、命名規範、命名拼寫檢查（如 handel→handle，必須報告）、註釋完整性
+- performance: 不必要渲染、大列表優化、圖片/資源優化、算法複雜度
+- maintainability: 單一職責、依賴注入、配置外部化、日誌支持` : ''}
+
+【審查要點】
+${reviewTasks.requirementMatching ? '- **需求匹配**: 功能缺失、需求遺漏、實現偏差' : ''}
+${reviewTasks.contractChecking ? '- **契約檢查**: API 規範、參數格式、響應處理' : ''}
+${reviewTasks.robustnessChecking ? '- **健壯性**: 錯誤處理、邊界校驗、數據驗證、資源管理' : ''}
+${reviewTasks.securityChecking ? '- **安全性**: XSS 防護、輸入過濾、敏感信息、權限校驗' : ''}
+${reviewTasks.optimization ? '- **優化建議**: 代碼結構、性能優化、可維護性' : ''}
+
+【输出格式】
+完成分析后，请严格按照以下 JSON 格式输出：
+
+\x60\x60\x60json
+{
+  "summary": {
+    "overallStatus": "passed|failed|partial",
+    "totalIssues": 0,
+    "comment": "審查總結"
+  }${this.buildJsonFields(reviewTasks)}
+}
+\x60\x60\x60
+
+**⚠️⚠️⚠️ 致命要求（违反将导致审查失败）⚠️⚠️⚠️**
+
+⚠️ **跨维度去重**：同一代码位置的同一问题，只在一个维度中报告，不要在多个维度重复
+
+🚨 **每个问题必须包含准确的行号！没有行号的问题是无效的！**
+
+代码审查的核心价值在于告诉开发者**具体哪里有问题**。如果不说清楚第几行，开发者无法修复问题。
+
+**❌ 错误示例（无效）**：
+- { "ruleId": "QA-001", "file": "path/to/file.dart", "line": 0, "message": "API调用不正确" }
+  ↑ 行号为0，无效！开发者不知道去哪一行修复！
+
+**✅ 正确示例（有效）**：
+- { "ruleId": "QA-001", "file": "E:\\\\2025\\\\project\\\\lib\\\\api\\\\user.dart", "line": 47, "message": "getUserListAPI 调用路径错误：代码使用 '/user/list'，API 文档要求 '/users'" }
+  ↑ 行号为47，有效！开发者直接去第47行修复！
+
+**📋 行号获取方法**：
+1. 使用 read_file 工具读取文件时，注意每行开头的行号
+2. 问题在哪一行，line 就填那一行的行号
+3. 如果问题跨越多行，填写问题开始的行号
+4. **绝对不能填 0 或留空！**
+
+**🔍 其他必须字段**：
+- file: 完整文件路径（从 read_file 工具返回的路径复制）
+- line: 准确行号（大于0的整数）
+- message: 具体问题描述（不能模糊）
+- suggestion: 修复建议
+
+📋 **问题描述格式要求（必须遵守）**：
+
+🚨 **禁止使用的模糊词汇（违反将被拒绝）**：
+- ❌ "部分"、"有些"、"某些" → 必须明确指出具体是哪个API/方法/字段
+- ❌ "可能"、"或许"、"大概" → 必须确定是什么问题，不要猜测
+- ❌ "未检查"、"未实现" → 必须说明具体缺少什么功能/参数/字段
+- ❌ "请参考需求" → 必须明确指出需求要求什么、代码实际是什么
+- ❌ "处理不正确"、"未正确处理" → 必须说明哪里的处理不正确、应该如何处理、实际如何处理
+
+🚨 **问题描述必须包含的要素**：
+1. **具体位置**：哪个文件、哪一行、哪个函数/方法
+2. **具体问题**：多了什么/少了什么/错了什么
+3. **需求要求**：需求明确要求是什么（引用原文）
+4. **实际实现**：代码实际是什么（引用代码）
+5. **差异对比**：要求 vs 实际的差异在哪里
+
+❌ **模糊描述示例（禁止）**：
+- "部分 API 调用未与 API 文档一致" → 不清楚是哪个API、哪里不一致
+- "getUserListAPI 的参数可能不完整" → 不确定哪个参数缺失
+- "部分响应数据处理可能不正确" → 不清楚哪个数据处理有问题
+
+✅ **具体描述示例（必须）**：
+- "addUserAPI 调用缺少必填参数 'email'，API文档要求email必填，但代码第47行未传递此参数"
+- "formatDate 方法中空值返回 '-'，需求要求空值返回 '--'，差异：使用了错误的占位符"
+- "页面显示'登入'按钮，需求要求显示'登录'"（说明具体差异）
+`;
+    }
+
+    // 构建消息
+    let messages = [
+      { role: 'system', content: systemPrompt }
+    ];
+
+    // 根据 mode 添加 user 消息
+    if (useFunctionCalling) {
+      // Function Calling 模式：让 AI 按需读取文件
+      messages.push({
+        role: 'user',
+        content: `请开始审查代码，对照需求检查实现是否符合要求。
+
+⚠️⚠️⚠️ **【最重要】必须按顺序读取文件** ⚠️⚠️⚠️
+
+**第一步**：使用 list_files_by_role 查看所有文件
+**第二步**：依次使用 read_file 读取以下文件（必须全文读取）：
+1. **Controller 层文件**（controller/）- 检查数据处理、格式化
+2. **API 层文件**（api/）- 检查 API 调用
+3. **View 层文件**（view/）- 检查页面显示
+
+❌ **禁止**：跳过 Controller/API/View 任何一个文件
+✅ **必须**：对这三层的每个文件都使用 read_file 完整读取
+
+**Controller 层重点检查**：
+- 所有数据处理方法（formatDate、formatXXX、processData 等）
+- 空值处理：需求值 vs 代码实际值
+- 日期格式：需求格式 vs 代码实际格式
+- 任何数据转换、格式化操作
+
+⚠️⚠️⚠️ **每个问题必须包含准确的行号（line > 0）** ⚠️⚠️⚠️
+
+没有行号的代码审查是毫无意义的。开发者需要知道具体是哪一行代码有问题才能修复。
+
+请按上述顺序读取文件后，再开始检查和报告问题。`
+      });
+    } else {
+      // Coding Plan 模式：直接提供代码内容
+      messages.push({
+        role: 'user',
+        content: `请审查以下代码，执行三维对齐审查：
+1. **Requirement Matching** - 检查需求是否已实现
+2. **Contract Checking** - 检查 API 使用是否符合规范
+3. **Optimization** - 提供优化建议
+
+【代码内容】${codeContent}
+
+⚠️⚠️⚠️ **致命要求：行号不能为0！** ⚠️⚠️⚠️
+
+代码审查必须告诉开发者具体哪一行有问题。**没有准确行号的问题是无效的！**
+
+**如何确定行号**：
+- 代码内容已提供，每行都有对应的行号
+- 找到有问题的代码行，填写该行的行号
+- 例如：问题在第 47 行 → "line": 47
+- ❌ 绝对不能填 0、null 或留空！
+
+**输出格式要求**：
+每个问题**必须**包含以下字段：
+- file: 问题所在文件的完整路径（从代码中提取）
+- line: 问题所在行号（**必须大于 0 的整数**）
+- message: 具体问题描述（说明哪一行、什么问题）
+- suggestion: 修复建议
+
+如果问题涉及多个文件，请为每个文件分别创建一个问题条目。
+
+请开始审查并输出包含 requirementMatching、contractChecking、optimization 和 issues 的完整 JSON 格式结果。`
+      });
+    }
+
+    console.log(`[SegmentExecutor] DEBUG: messages 数组长度 = ${messages.length}`);
+    console.log(`[SegmentExecutor] DEBUG: mode = ${useFunctionCalling ? 'Function Calling' : 'Coding Plan'}`);
+    console.log(`[SegmentExecutor] DEBUG: systemPrompt 包含'需求关键信息提取': ${systemPrompt.includes('需求关键信息提取')}`);
+    console.log(`[SegmentExecutor] DEBUG: systemPrompt 包含'空值显示为': ${systemPrompt.includes('空值显示为')}`);
+    console.log(`[SegmentExecutor] DEBUG: systemPrompt 长度: ${systemPrompt.length}`);
+
+    const maxTurns = useFunctionCalling ? 15 : 1; // Coding Plan 模式只需要 1 轮
+    let finalContent = null;
+
+    for (let turn = 1; turn <= maxTurns; turn++) {
+      console.log(`[SegmentExecutor] 阶段2 第 ${turn}/${maxTurns} 轮...`);
+
+      // 使用智能模型选择和重试机制
+      const phase2Config = QAModelConfig.getTwoPhaseConfig(2);
+      console.log(`[SegmentExecutor] 阶段2 使用模型: ${phase2Config.preferred}`);
+
+      const requestOptions = {
+        temperature: phase2Config.temperature,
+        maxTokens: phase2Config.maxTokens,
+        model: phase2Config.preferred,
+        enableModelFallback: true  // 启用自动模型回退
+      };
+
+      // 只有启用 Function Calling 时才添加 tools 参数
+      if (useFunctionCalling && tools) {
+        requestOptions.tools = tools;
+        requestOptions.toolChoice = 'auto';
+      }
+
+      const response = await this.callLLMWithRetry('code_analysis', messages, requestOptions);
+
+      if (!response.success) {
+        // 如果是因为取消而失败
+        if (response.cancelled) {
+          return {
+            issues: [],
+            summary: '用户取消了审查',
+            cancelled: true,
+            error: '用户取消'
+          };
+        }
+        return {
+          issues: [],
+          summary: 'AI 调用失败: ' + (response.error || '未知错误'),
+          error: response.error
+        };
+      }
+
+      const assistantMessage = {
+        role: 'assistant',
+        content: response.content || null,
+        tool_calls: response.toolCalls || null,
+        rawContentBlocks: response.rawContentBlocks || null
+      };
+      messages.push(assistantMessage);
+
+      // 如果没有启用 Function Calling，直接返回结果
+      if (!useFunctionCalling) {
+        finalContent = response.content;
+        console.log('[SegmentExecutor] 阶段2 AI 完成分析（Coding Plan 模式）');
+        break;
+      }
+
+      // Function Calling 模式：检查是否有工具调用
+      if (!response.toolCalls || response.toolCalls.length === 0) {
+        finalContent = response.content;
+        console.log('[SegmentExecutor] 阶段2 AI 完成分析');
+        break;
+      }
+
+      console.log(`[SegmentExecutor] 阶段2 收到 ${response.toolCalls.length} 个工具调用请求`);
+
+      for (const toolCall of response.toolCalls) {
+        const result = await this.executeToolCall(toolCall, segment, context);
+        messages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result)
+        });
+      }
+
+      // 智能压缩对话历史，避免上下文超出限制
+      // 保留：system + user + 最近读取的 4-5 个文件内容
+      // 丢弃：AI 的中间分析内容（非工具响应）
+      const compressedMessages = this.compressMessages(messages);
+      if (compressedMessages.length < messages.length) {
+        console.log(`[SegmentExecutor] 压缩对话历史: ${messages.length} → ${compressedMessages.length} 条消息`);
+        messages = compressedMessages;
+      }
+
+      // 发送进度
+      if (this.onProgress) {
+        this.onProgress({
+          type: 'progress',
+          stage: 'analyzing',
+          message: `AI 正在分析文件... (第 ${turn + 1} 轮)`,
+          segmentIndex: segment.index || 0,
+          totalSegments: segment.totalSegments || 1,
+          percent: Math.min((turn + 1) * 5, 95)
+        });
+      }
+
+      // 检查是否被取消
+      if (global.qaReviewerCancelled) {
+        return {
+          issues: [],
+          summary: '用户取消了审查',
+          error: '用户取消',
+          cancelled: true
+        };
+      }
+    }
+
+    if (!finalContent) {
+      return {
+        issues: [],
+        summary: 'AI 未返回分析结果',
+        error: 'AI 未返回分析结果'
+      };
+    }
+
+    return this.parseResponse(finalContent);
+  }
+
+  /**
+   * 使用 glm-5 一次性分析所有代码
+   */
+  async analyzeCodeGLM5AllAtOnce(filesToReview, segment, context) {
+    const { requirements, projectPath, apiDocAdapter } = context;
+    const fs = require('fs');
+    const path = require('path');
+
+    // 构建代码内容
+    let codeContent = '';
+    const byRole = { model: [], view: [], controller: [], service: [], api: [], component: [], other: [] };
+
+    for (const filePath of filesToReview) {
+      const fileRole = this.inferFileType(filePath, context.projectType);
+      if (!byRole[fileRole]) byRole[fileRole] = [];
+      byRole[fileRole].push({ path: filePath, name: path.basename(filePath) });
+    }
+
+    // 按角色顺序添加文件
+    const roleOrder = ['model', 'api', 'service', 'controller', 'view', 'component', 'other'];
+    for (const role of roleOrder) {
+      if (byRole[role].length > 0) {
+        codeContent += `\n// ========== ${role.toUpperCase()} LAYER ==========\n`;
+        for (const file of byRole[role]) {
+          try {
+            if (fs.existsSync(file.path)) {
+              const content = fs.readFileSync(file.path, "utf-8");
+              const lineCount = content.split(String.fromCharCode(10)).length;
+              const contentWithLines = this.addLineNumbers(content);
+              codeContent += String.fromCharCode(10) + "// File: " + file.name + " (" + lineCount + " lines)" + String.fromCharCode(10);
+              codeContent += "// Path: " + file.path + String.fromCharCode(10);
+              codeContent += contentWithLines + String.fromCharCode(10) + String.fromCharCode(10);
+            }
+          } catch (e) {
+            codeContent += `\n// [Error reading file: ${file.name}]\n\n`;
+          }
+        }
+      }
+    }
+
+    // 追加 i18n 文件内容
+    if (segment.metadata && segment.metadata.i18nFiles && segment.metadata.i18nFiles.length > 0) {
+      codeContent += '\n// ========== I18N / TRANSLATIONS LAYER ==========\n';
+      for (const i18nPath of segment.metadata.i18nFiles) {
+        try {
+          if (fs.existsSync(i18nPath)) {
+            const translations = this.parseI18nFile(i18nPath, context.projectType);
+            const langCode = this.detectLanguageFromPath(i18nPath);
+            const displayTranslations = translations.slice(0, 150);
+            codeContent += '\n// File: ' + path.basename(i18nPath) + ' (' + langCode + ', ' + translations.length + ' keys)\n';
+            for (const t of displayTranslations) {
+              codeContent += '// "' + t.key + '": "' + t.value + '"\n';
+            }
+            if (translations.length > 150) {
+              codeContent += '// ... (' + (translations.length - 150) + ' more keys)\n';
+            }
+          }
+        } catch (e) {
+          codeContent += '\n// [Error reading i18n file: ' + i18nPath + ']\n';
+        }
+      }
+    }
+
+    // 添加 API 文档信息
+    let apiInfo = '';
+    if (apiDocAdapter) {
+      const allApis = apiDocAdapter.apis || [];
+      if (allApis.length > 0) {
+        apiInfo = `\n【相关 API 文档】\n`;
+        allApis.forEach(api => {
+          apiInfo += `- [${api.method || 'GET'}] ${api.path}: ${api.title || ''}\n`;
+          if (api.description) apiInfo += `  ${api.description}\n`;
+        });
+      }
+    }
+
+    // 构建提示词
+    const prompt = `你是一个资深的 QA 工程师，负责验证代码是否符合需求。
+
+⚠️ **核心原则：只检查代码实现，不评论需求文档！**
+
+【审查范围】
+- ✅ 检查：代码是否实现了需求中的功能
+- ✅ 检查：代码实现是否有 bug、遗漏或不完整
+- ✅ 检查：API 调用是否正确（路径、参数、响应处理）
+- ❌ 不评论：需求文档是否清晰完整
+- ❌ 不评论：API 文档是否描述清楚
+
+【项目信息】
+- 项目路径: ${projectPath}
+- 审查功能: ${(segment.features || []).join(', ')}
+
+【需求描述】
+${requirements}
+
+${apiInfo}
+
+【代码文件】
+以下是需要审查的代码文件：
+
+${codeContent}
+
+【审查任务】
+请对照需求检查上述代码，找出以下类型的问题：
+
+1. **功能缺失** (QA-FUNC-XXX): 需求明确要求但代码未实现
+2. **架构问题** (QA-ARCH-XXX): 验证逻辑位置不当、代码组织问题
+3. **代码缺陷** (QA-BUG-XXX): 明确的 bug 或逻辑错误
+4. **优化建议** (QA-OPT-XXX): 性能、可维护性等改进建议
+
+🚨 **强制要求（违反将被拒绝）**：
+- **只报告你从代码中发现的问题，不要评论需求或 API 文档**
+- **每个问题必须包含准确的 file 和 line 字段**
+- **禁止报告"需求不明确"、"API 文档不清楚"等问题**
+
+📝 **输出示例**：
+
+✅ **好的问题示例**（基于实际代码检查）：
+- "列表预期10笔分页，但代码中 pageSize 设置为 9"
+- "for 循环缺少退出条件，可能导致死循环"
+- "需求要求按 ID 查询，但代码中缺少该实现"
+
+❌ **不要报告的问题**：
+- "需求中提到了...但没有详细说明"（这是评论需求）
+- "API 文档中未明确指出..."（这是评论文档）
+
+【输出格式】
+请严格按照以下 JSON 格式输出：
+
+\x60\x60\x60json
+{
+  "summary": {
+    "overallStatus": "passed|failed|partial",
+    "totalIssues": 0,
+    "comment": "简要总结"
+  },
+  "issues": [
+    {
+      "ruleId": "QA-FUNC-001",
+      "severity": "high|medium|low",
+      "file": "文件路径（必须包含完整路径，不能为空）",
+      "line": 行号（必须大于0，用于添加TODO注释）",
+      "location": {
+        "function": "函数名（可选，帮助精确定位）",
+        "class": "类名（可选，帮助精确定位）",
+        "anchor": "定位点文本（可选，在这行附近插入TODO）",
+        "insertPosition": "before|after|replace（默认before，在定位点之前插入）"
+      },
+      "message": "问题描述",
+      "suggestion": "修复建议"
+    }
+  ]
+}
+` + '```';
+
+    try {
+      // 使用智能模型选择和重试机制
+      const config = QAModelConfig.getSinglePhaseConfig();
+      console.log(`[SegmentExecutor] 单阶段审查使用模型: ${config.preferred}`);
+
+      const response = await this.callLLMWithRetry('code_analysis', [
+        { role: 'system', content: '你是一个资深的 QA 工程师，擅长代码审查和需求验证。' },
+        { role: 'user', content: prompt }
+      ], {
+        model: config.preferred,
+        temperature: config.temperature,
+        maxTokens: config.maxTokens,
+        enableModelFallback: true
+      });
+
+      if (!response.success) {
+        if (response.cancelled) {
+          return {
+            issues: [],
+            summary: '用户取消了审查',
+            cancelled: true,
+            error: '用户取消'
+          };
+        }
+        return {
+          issues: [],
+          summary: 'AI 分析失败: ' + (response.error || '未知错误'),
+          error: response.error
+        };
+      }
+
+      return this.parseResponse(response.content);
+
+    } catch (error) {
+      return {
+        issues: [],
+        summary: '分析失败: ' + error.message,
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * 使用 glm-5 分批分析代码
+   */
+  async analyzeCodeGLM5Batched(filesToReview, segment, context, maxSize) {
+    // 简化实现：只分析高优先级文件
+    const fs = require('fs');
+    const path = require('path');
+
+    // 筛选高优先级文件
+    let highPriorityFiles = filesToReview;
+    if (segment.identifiedFiles) {
+      highPriorityFiles = segment.identifiedFiles
+        .filter(f => f.priority === 'high' || f.priority === 'medium')
+        .map(f => f.path);
+    }
+
+    // 限制数量
+    highPriorityFiles = highPriorityFiles.slice(0, 10);
+
+    console.log(`[SegmentExecutor] 分批模式：分析 ${highPriorityFiles.length} 个高优先级文件`);
+
+    // 使用一次性分析
+    const limitedSegment = { ...segment, files: highPriorityFiles };
+    return await this.analyzeCodeGLM5AllAtOnce(highPriorityFiles, limitedSegment, context);
+  }
+
+  /**
+   * 解析 JSON 响应的辅助方法
+   */
+  parseJSONResponse(content) {
+    try {
+      // 提取 JSON 代码块
+      let jsonStr = content;
+      const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[1];
+      } else {
+        const braceMatch = content.match(/\{[\s\S]*\}/);
+        if (braceMatch) {
+          jsonStr = braceMatch[0];
+        }
+      }
+      jsonStr = this.cleanJsonString(jsonStr);
+      return this.parseJsonWithRepair(jsonStr);
+    } catch (e) {
+      console.warn('[SegmentExecutor] parseJSONResponse 解析失败:', e.message);
+      return null;
+    }
+  }
+
+  /**
+   * 智能压缩对话历史，避免上下文超出限制
+   * @param {Array} messages - 对话历史
+   * @returns {Array} 压缩后的对话历史
+   */
+  compressMessages(messages) {
+    // 如果消息不多，不需要压缩
+    if (messages.length <= 10) {
+      return messages;
+    }
+
+    const compressed = [];
+    const recentToolResponses = []; // 保存最近的工具响应（文件内容）
+    let toolResponseCount = 0;
+    const MAX_TOOL_RESPONSES = 5; // 保留最近 5 个文件的完整内容
+
+    // 从后往前遍历，保留最近的工具响应
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+
+      // 保留 system 和第一个 user 消息
+      if (msg.role === 'system' || (msg.role === 'user' && i === 1)) {
+        compressed.unshift(msg);
+        continue;
+      }
+
+      // 保留工具响应（文件内容）
+      if (msg.role === 'tool' && toolResponseCount < MAX_TOOL_RESPONSES) {
+        recentToolResponses.unshift(msg);
+        toolResponseCount++;
+      }
+
+      // 保留最后的 assistant 消息（可能是最终结果）
+      if (msg.role === 'assistant' && i === messages.length - 1) {
+        // 这个会在后面添加
+      }
+    }
+
+    // 重新组装：system + user + 工具响应（按原始顺序）
+    compressed.push(...recentToolResponses);
+
+    // 添加最后的 assistant 消息（如果有）
+    const lastAssistant = messages[messages.length - 1];
+    if (lastAssistant && lastAssistant.role === 'assistant') {
+      compressed.push(lastAssistant);
+    }
+
+    console.log(`[SegmentExecutor] compressMessages: 保留 ${toolResponseCount} 个文件内容，丢弃 ${messages.length - compressed.length} 条消息`);
+
+    return compressed;
+  }
+
+  /**
+   * 去重工具结果：当 AI 重复读取同一文件时，将较早的重复响应替换为短引用
+   * 与 compressMessages 不同：此方法保留所有 AI 推理消息，仅去重重复的文件内容
+   * @param {Array} messages - 对话历史
+   * @returns {Array} 去重后的对话历史（保留所有推理，仅去掉重复文件内容）
+   */
+  deduplicateToolResults(messages) {
+    if (messages.length <= 6) return messages;
+
+    // 步骤1: 记录每个 assistant tool_call 请求的文件路径
+    const toolCallIdToFilePath = new Map();
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.role === 'assistant' && msg.tool_calls) {
+        for (const tc of msg.tool_calls) {
+          if (tc.function?.name === 'read_file' || tc.function?.name === 'get_file_summary') {
+            try {
+              const args = JSON.parse(tc.function.arguments || '{}');
+              if (args.filePath) {
+                toolCallIdToFilePath.set(tc.id, args.filePath);
+              }
+            } catch (e) { /* ignore */ }
+          }
+        }
+      }
+    }
+
+    // 步骤2: 记录每个文件路径最后一次读取的位置
+    const lastFileReadIndex = new Map(); // filePath -> messageIndex
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        const filePath = toolCallIdToFilePath.get(msg.tool_call_id);
+        if (filePath) {
+          lastFileReadIndex.set(filePath, i);
+        }
+      }
+    }
+
+    // 步骤3: 找出需要替换为短引用的旧 tool 响应（同一文件的较早读取）
+    const deduped = [];
+    let dedupCount = 0;
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        const filePath = toolCallIdToFilePath.get(msg.tool_call_id);
+        if (filePath && lastFileReadIndex.has(filePath)) {
+          const latestIndex = lastFileReadIndex.get(filePath);
+          if (i < latestIndex) {
+            // 这是同一文件的较早读取，替换为短引用
+            dedupCount++;
+            deduped.push({
+              role: 'tool',
+              tool_call_id: msg.tool_call_id,
+              content: `[已去重: ${filePath} 在后续已被重新读取，此内容已省略]`
+            });
+            continue;
+          }
+        }
+      }
+      deduped.push(msg);
+    }
+
+    if (dedupCount > 0) {
+      console.log(`[SegmentExecutor] deduplicateToolResults: 去重 ${dedupCount} 个重复文件读取，保留 ${deduped.length} 条消息`);
+    }
+
+    return deduped;
+  }
+
+  /**
+   * 使用 Function Calling 进行需求验证
+   * AI 可以按需读取文件，而不是一次性发送所有代码
+   */
+  async checkRequirementsWithTools(segment, context) {
+    const _dl = (msg) => { try { const fs = require('fs'); const p = require('path'); fs.appendFileSync(p.join('E:', 'AI', 'dev-quality-inspector', 'data', 'debug.log'), `[${new Date().toISOString()}] ${msg}\n`); } catch(e) {} };
+
+    _dl('[checkRequirementsWithTools] 入口: llm=' + !!this.llm + ', files=' + (segment.files?.length || 0));
+
+    if (!this.llm) {
+      _dl('[checkRequirementsWithTools] LLM 未配置！');
+      return {
+        issues: [],
+        summary: 'LLM 未配置，跳过 AI 分析',
+        error: 'LLM 未配置'
+      };
+    }
+
+    const { requirements, dimensions, projectPath } = context;
+    const fs = require('fs');
+    const path = require('path');
+
+    // 根据维度确定审查任务
+    const reviewTasks = this.generateReviewTasks(dimensions);
+
+    // 构建初始提示词（只包含项目上下文和需求，不包含代码）
+    const tools = this.buildToolsDefinition(segment, context);
+
+    // 构建项目上下文摘要
+    let projectContext = '';
+    if (this.contextAdapter && this.contextAdapter.isAvailable()) {
+      const contextSummary = this.contextAdapter.getSummary();
+      projectContext += `\n【项目上下文】\n${contextSummary}\n`;
+    }
+
+    // 构建文件列表摘要 - 使用完整路径
+    // ⚠️ 重要：显示完整路径，避免 AI 自己构造错误路径
+    const filesByRole = {};
+    for (const filePath of segment.files) {
+      const fileRole = this.inferFileType(filePath, context.projectType);
+      if (!filesByRole[fileRole]) filesByRole[fileRole] = [];
+      filesByRole[fileRole].push(filePath); // 使用完整路径，不是 basename
+    }
+
+    let fileListSummary = '\n【待审查文件】（按角色分组，使用完整路径）\n';
+    Object.entries(filesByRole).forEach(([roleKey, roleFiles]) => {
+      fileListSummary += `\n${roleKey.toUpperCase()} (${roleFiles.length} 个):\n`;
+      roleFiles.slice(0, 10).forEach(f => fileListSummary += `  ${f}\n`);
+      if (roleFiles.length > 10) fileListSummary += `  ... 还有 ${roleFiles.length - 10} 个文件\n`;
+    });
+    fileListSummary += '\n⚠️ 注意：上述路径是完整的文件系统路径，使用 read_file 工具时请直接复制使用。\n';
+
+    // 初始系统提示
+    let systemPrompt = `你是一个资深的 QA 工程师，专注于代码审查。
+
+⚠️ **核心原则：完整理解需求，严格对照代码检查！**
+
+【审查范围】
+- ✅ 审查所有层：View、Controller、Component、Provider、Service、API、Model
+- ✅ 检查数据流向：API → Provider → Controller → View 的数据传递是否正确
+- ❌ 不评论：需求文档是否清晰完整
+
+【审查重点】（按优先级）
+
+🥇 **优先级1：需求符合性检查**
+- 需求提到的功能是否已实现？
+- 是否有遗漏的功能点？
+- 实现是否完整（有头有尾，没有半成品）？
+- 实现是否有异常（逻辑错误、bug、空值处理等）？
+- ⚠️ **格式检查**：需求中提到的任何格式要求（空值显示、日期格式、文本内容等），代码是否完全一致？
+
+🥈 **优先级2：API 调用与数据处理检查**
+- API 路径（path）是否与文档一致？
+- 请求参数是否完整、格式是否正确？
+- 响应数据处理是否正确（是否正确解析、是否处理错误情况、格式转换是否正确）？
+- 数据流向是否正确（从 API 到 View 的数据传递）
+
+🥉 **优先级3：代码优化建议**
+- 是否有重复代码可以抽取？
+- 是否有性能优化空间（如不必要的重渲染、大量数据分页等）？
+- 是否有更好的实现方式？
+
+【格式要求检查】（特别重要）
+当需求中出现以下关键词时，必须检查代码格式是否正确：
+- "显示为"、"呈现为"、"需要为" → 检查显示内容是否完全一致
+- "格式:"、"格式为" → 检查日期/时间/数字格式是否正确
+- "XX时显示XX" → 检查条件显示逻辑是否正确
+- 任何带具体值的要求 → 检查代码中是否使用了相同的值
+
+⚠️ **例如**：
+- 需求说"空值显示为 --"，代码就必须用 --，不能用 - 或空字符串
+- 需求说"格式: YYYY-MM-DD"，代码就必须按这个格式化，不能用民国年或其他格式
+- 需求说"显示'已完成'"，代码就不能显示"完成"
+
+🚨 **格式检查必须严格对照需求，逐字比对！**
+- ✅ **必须报告**：需求明确要求某个值/格式，但代码使用了不同的值/格式
+- ✅ **必须报告**：需求明确要求显示某个字段，但页面/表格缺少此列
+- ✅ **必须报告**：需求明确要求的日期/时间/数字格式，但代码使用了不同格式
+- 📋 **检查方法**：
+  1. 从需求文档中提取所有带具体值的格式要求（如"空值显示为XX"、"格式:XX"、"显示XX时XX"等）
+  2. 在代码中查找对应的实现（格式化函数、数据绑定、UI 组件等）
+  3. 逐字比对需求值和代码值，任何不一致都必须报告
+  4. **必须使用 get_translations 工具**验证多语言文案：检查到涉及界面文本/标签/提示信息时，必须调用 get_translations 获取对应的多语言翻译进行比对
+
+🚨 **重要区分：显示内容 vs API 字段名**
+- ✅ **需要检查**：页面显示的文本、标签、提示信息（如表格列头"用户ID"、"账号"等）
+- ❌ **不要检查**：后端 API 字段名（如 userId、userName、accountId 等）
+- 📋 **原则**：
+  - 需求描述的是"用户看到什么" → 显示内容需符合需求
+  - API 文档定义的是"数据结构" → 字段名以后端文档为准
+  - 前端代码调用 API 时使用后端定义的字段名（userId）是**正确的**
+  - 只有当需求明确要求显示某个字段内容时，才检查显示值是否正确
+
+❌ **错误示例**（不要这样报告）：
+- 需求说"显示用户ID"，API 字段是 userId → ✅ 这是正确的！不要报告"字段名不一致"
+- 需求说"显示账号"，API 字段是 account → ✅ 这是正确的！不要报告格式错误
+
+✅ **正确检查**：
+- 需求说"空值显示为 --" → 检查页面是否显示 --（而不是检查 API 字段名）
+- 需求说"日期格式为 YYYY-MM-DD" → 检查页面显示的日期格式（而不是检查 API 传来的原始格式）
+
+【工作模式】🔧 **View驱动追踪式审查**
+
+审查锚点是 View 文件。以 View 为起点，逐段追踪数据流链路。
+- View → Controller → Provider/API，每个文件只读一次
+- 参考文件（model、binding、service）只需看签名摘要
+- 读完三层后立即输出 JSON
+
+1. **get_file_summary** - 获取文件结构摘要
+   - 🎯 **用于**: 参考文件（model/binding/service）、组件、共享文件
+   - 📦 **返回**: 类名、函数签名、导入，不含完整实现
+
+2. **read_file** - 读取文件完整内容
+   - 🎯 **只用于**: 主要文件（View、Controller、API）
+   - ❌ 不要读取参考文件和共享文件
+   - ❌ 同一文件只读取一次，不要重复调用
+
+3. **read_image** - 读取 UI 设计稿
+4. **list_files_by_role** - 列出指定角色的所有文件
+5. **get_translations** - 获取多语言翻译文件内容
+   - 🎯 **用于**: 验证界面文本、标签、按钮文字是否与需求一致
+
+【审查流程】（必须按顺序执行）
+1. **第一步：读 View** - 使用 read_file 读取 View 文件，理解页面结构和数据引用
+2. **第二步：追踪数据流** - 从 View 中找出引用的 Controller/Provider，使用 read_file 读取
+3. **第三步：交叉验证** - 逐行对照 View→Controller→API 数据流，检查格式、空值、API路径
+4. **第四步：参考文件和翻译** - 使用 get_file_summary 了解 model/binding/service 签名，使用 get_translations 验证界面文本
+5. **第五步：输出 JSON** - 所有需求已验证完毕，输出审查结果 JSON
+
+🚨 **强制要求（违反将被拒绝）**：
+
+✅ **4条必须遵守**：
+1. **必须先读 View** — 以 View 为锚点，追踪数据引用到 Controller/API
+2. **必须追踪数据流** — 从 View 中识别引用的 Controller/API，逐行验证数据传递
+3. **必须逐行验证格式** — 需求中每个格式要求（空值、日期、文本）必须在代码中找到对应实现并比对
+4. **必须行号 > 0** — 每个问题的 line 必须是具体行号，禁止 line=0/null
+
+❌ **4条禁止行为**：
+1. **禁止跳过 View** — 不允许只读 Controller/API 而不读 View
+2. **禁止未读文件就报告** — 必须先 read_file 读取文件，再报告该文件的问题
+3. **禁止使用 "covered"/"missing" 数组** — 不要输出需求覆盖状态数组，只输出具体问题
+4. **禁止报告"需求不明确"** — 需求是给定的，禁止评论需求本身
+
+**View驱动逐段追踪方法**：
+
+读取 View 文件后，按页面结构逐段追踪：
+- **搜索区域**：搜索框、筛选器的数据绑定 → 追踪到 Controller 的搜索方法 → 追踪到 API 的搜索端点
+- **表格区域**：表格列定义 → 追踪到 Controller 的数据处理方法 → 追踪到 API 的字段映射
+- **操作区域**：按钮、菜单 → 追踪到 Controller 的操作方法 → 追踪到 API 的操作端点
+- **弹窗区域**：弹窗内容 → 追踪到 Controller 的弹窗数据方法 → 追踪到 API 的详情端点
+- **通用检查**：空值显示、日期格式、文本内容 → 从 Controller 的格式化方法 → 与需求逐字比对
+
+⚠️⚠️⚠️ **行号要求（最高优先级）** ⚠️⚠️⚠️
+- **每个问题必须包含准确的行号（line > 0）**
+- **绝对不允许输出 line = 0、line = null 或省略 line 字段**
+- 使用 read_file 读取文件后，文件内容会显示行号
+- 问题在哪一行，line 就填那一行的数字
+- **如果无法确定行号，宁可不要报告这个问题！**
+
+❌ **错误示例（无效）**：
+- { "ruleId": "QA-001", "line": 0, ... }  ← 行号为0，无效！
+- { "ruleId": "QA-002", "line": null, ... }  ← 行号为null，无效！
+- { "ruleId": "QA-003", ... }  ← 没有line字段，无效！
+
+✅ **正确示例（有效）**：
+- { "ruleId": "QA-001", "line": 47, "file": "...", ... }  ← 有效
+- { "ruleId": "QA-002", "line": 153, "file": "...", ... }  ← 有效
+
+- **只评论你通过工具获取的信息，不要猜测或推断**
+- **禁止报告"需求不明确"、"API 文档不清楚"等问题**
+
+【项目信息】
+- 项目路径: ${projectPath}
+- 审查功能: ${(segment.features || []).join(', ')}
+${projectContext}
+${fileListSummary}
+
+【需求描述】
+${requirements}
+
+【审查任务】
+${reviewTasks.requirementMatching ? `✅ **1. 需求符合性检查**
+   - 需求提到的功能是否已实现
+   - 是否有遗漏的功能点
+   - 实现是否完整（有头有尾，没有半成品）
+   - ⚠️ **格式检查**：需求中提到的格式要求（空值、日期、文本等）是否正确实现
+   - 检查与需求是否有差异` : ''}
+${reviewTasks.contractChecking ? `✅ **2. API 调用与契约检查**
+   - API 路径是否与文档一致（只检查 path 部分，不包括环境变量）
+   - 请求参数字段名是否与 API 文档一致（检查传给后端的字段名）
+   - 响应数据处理是否正确（格式化、错误码处理）
+   - 数据流向是否正确（从 API → Controller → View）` : ''}
+${reviewTasks.robustnessChecking ? `✅ **3. 健壮性检查**
+   - **错误处理**：在 Controller 层检查 try-catch 覆盖、错误提示（不在 API 层检查）
+   - **边界校验**：在 Controller/View 层检查空值检查、数组越界等（不在 API 层检查）
+   - **数据验证**：在表单层检查格式验证（日期、邮箱等），不在 API 层重复检查
+   - **资源管理**：useEffect 清理、定时器清除、监听器释放、Controller dispose()` : ''}
+${reviewTasks.securityChecking ? `✅ **4. 安全检查**
+   - **输入安全**：XSS 防护、输入过滤、注入防护
+   - **数据安全**：敏感信息脱敏、密钥硬编码检查、本地存储安全
+   - **认证授权**：权限校验、Token/Session 管理、CSRF 防护` : ''}
+${reviewTasks.optimization ? `✅ **5. 无障碍性（accessibility）**
+	   - 无障碍标签与语义化、键盘导航、颜色对比度
+✅ **6. 兼容性（compatibility）**
+	   - 浏览器兼容、响应式适配、国际化支持
+✅ **7. 性能（performance）**
+	   - 渲染优化、资源管理（内存/定时器/Controller dispose）、网络优化
+✅ **8. 可维护性（maintainability）**
+	   - 代码结构（组件拆分、重复代码、命名规范）、命名拼写检查（如 handel→handle，必须报告）、错误处理、可读性` : ''}
+
+⚠️ **重要**：只检查上述勾选（✅）的维度，未勾选的维度不需要检查！
+
+【输出格式】
+🚨 **必须遵守：只输出 JSON，不要输出任何其他文本！**
+- ❌ 禁止输出 "根据对代码的审查"、"以下是检查结果" 等前缀文本
+- ❌ 禁止输出 Markdown 格式的分析报告
+- ❌ **禁止在 requirementMatching 中使用 "covered" 或 "missing" 数组**（会导致 JSON 过大，解析失败）
+- ✅ 直接输出 JSON 对象，不要有任何额外说明
+
+完成分析后，请严格按照以下 JSON 格式输出：
+
+\x60\x60\x60json
+{
+  "summary": {
+    "overallStatus": "passed|failed|partial",
+    "totalIssues": 0,
+    "comment": "審查總結"
+  }${this.buildJsonFields(reviewTasks)}
+}
+\x60\x60\x60
+
+**⚠️ 关键要求（必须遵守，违反将导致问题被忽略）**：
+1. **每个问题必须包含 file 字段**：使用你通过工具读取的文件的完整路径
+2. **每个问题必须包含 line 字段**：问题所在的具体行号（必须大于 0，从 1 开始）
+   - ⚠️ **line = 0 会被系统忽略！**
+   - ⚠️ **没有 line 字段会被系统忽略！**
+   - ⚠️ **line = null 会被系统忽略！**
+3. **如何获取行号**：使用 read_file 工具读取文件后，文件内容显示的就是带行号的代码
+4. **问题在哪一行，line 就填那一行的数字**
+5. **如果不确定行号，不要报告这个问题**
+
+📋 **问题描述格式要求（非常重要）**：
+每个问题必须明确指出：
+- **具体是什么问题**：多了/少了/错误/缺失/不一致
+- **具体是哪个函数/API/字段**：必须明确名称，不要用模糊说法
+- **具体哪里不一致**：如果是 API 问题，要说明 path/参数/方法哪个不一致；如果是格式问题，要说明期望值 vs 实际值
+
+❌ **模糊描述（禁止这样）**：
+- "API 调用未与 API 文档一致" → 不清楚是哪个 API、什么地方不一致
+- "功能未检查" → 不明白要检查什么、code 已存在为什么还说未检查
+- "请参考需求实现" → 没说明具体缺少什么或错了什么
+
+✅ **清晰描述（必须这样）**：
+- "getUserListAPI 调用路径错误：代码使用 '/user/list'，API 文档要求 '/users'"
+- "addUserAPI 缺少必填参数 'email'，API 文档要求此参数必填"
+- "formatDate 方法中，空值返回 '-'，需求要求返回 '--'"
+- "列表缺少 '账号建立时间' 字段的显示，需求要求显示此字段"
+
+🚨 **禁止使用的模糊词汇（违反将被拒绝）**：
+- ❌ "部分"、"有些"、"某些" → 必须明确指出具体是哪个API/方法/字段
+- ❌ "可能"、"或许"、"大概" → 必须确定是什么问题，不要猜测
+- ❌ "未检查"、"未实现" → 必须说明具体缺少什么功能/参数/字段
+- ❌ "请参考需求" → 必须明确指出需求要求什么、代码实际是什么
+- ❌ "与文档不一致" → 必须说明具体哪个字段/路径/参数不一致，要求是什么、实际是什么
+- ❌ "与需求不完全一致"、"与需求有差异" → 必须说明具体什么不一致、哪个字段/功能不符合
+- ❌ "处理不正确"、"未正确处理" → 必须说明哪里的处理不正确、应该如何处理、实际如何处理
+
+🚨 **问题描述必须包含的要素**：
+1. **具体位置**：哪个文件、哪一行、哪个函数/方法
+2. **具体问题**：多了什么/少了什么/错了什么
+3. **需求要求**：需求明确要求是什么（引用原文）
+4. **实际实现**：代码实际是什么（引用代码）
+5. **差异对比**：要求 vs 实际的差异在哪里
+
+❌ **模糊描述示例（禁止）**：
+- "部分 API 调用未与 API 文档一致" → 不清楚是哪个API、哪里不一致
+- "getUserListAPI 的参数可能不完整" → 不确定哪个参数缺失
+- "部分响应数据处理可能不正确" → 不清楚哪个数据处理有问题
+- "formatDate 方法可能未正确处理空值" → 不确定空值应该怎么处理、实际怎么处理
+
+✅ **具体描述示例（必须）**：
+- "addUserAPI 调用缺少必填参数 'email'，API文档要求email必填，但代码第47行未传递此参数"
+- "formatDate 方法中空值返回 '-'，需求要求空值返回 '--'，差异：使用了错误的占位符"
+- "列表页面缺少 '账号建立时间' 字段显示，需求要求显示此字段，但表格只有5列"
+
+⚠️ **对于页面显示问题，必须明确指出**：
+- 具体是哪个文本/标签/字段不一致
+- 需求要求显示什么（如："登录"）
+- 实际显示什么（如："登入"）
+- 差异在哪里（如："页面显示'登入'按钮，需求要求显示'登录'"）
+
+🏗️ **各层职责范围（严格遵守）**：
+
+**API 层**（只检查以下内容，其他一律禁止）：
+- ✅ HTTP 方法（GET/POST/PUT/DELETE）是否与 API 文档匹配
+- ✅ API 路径（path）是否与文档一致
+- ✅ 请求参数名是否与文档一致
+- ✅ 请求参数类型是否与文档一致
+- ✅ 必填参数是否遗漏
+- ❌ **严格禁止检查**：
+  - 响应数据处理（分页信息、数据转换、空值格式化）→ Controller 层
+  - 错误处理（try-catch、错误捕获）→ Controller 层
+  - 参数验证（输入检查、格式验证）→ Controller 层
+  - 任何业务逻辑相关的内容 → Controller 层
+
+🚨 **API 层审查原则**：只对照 API 文档检查"发送给后端的请求"是否正确，不检查"后端返回的数据如何处理"
+
+**Controller 层**（检查业务逻辑和数据处理）：
+- ✅ API 响应数据的处理和转换（如分页信息提取、数据映射）
+- ✅ 空值格式化是否正确（如 '--' vs '-'）
+- ✅ 日期/时间格式是否正确（如公元年 vs 民国年）
+- ✅ 错误处理逻辑（但需识别已有的处理，如 handelError 调用）
+- ✅ 业务逻辑完整性
+- ❌ **不检查**：UI 表格栏位显示（这些是 View 层的事）
+
+**View 层**（检查 UI 显示）：
+- ✅ 页面/表格是否显示需求要求的字段（如"账号建立时间"、"最后更新时间"、"状态"等）
+- ✅ 页面显示的文本、标签是否与需求一致
+- ✅ 字段是否正确显示（列是否存在、显示位置是否正确）
+- ❌ **不检查**：API 调用、数据处理（这些是 Controller 层的事）
+
+**公共方法/工具函数**：
+- ✅ 公共方法被多处调用是正常的，不要报告为"重复代码"
+- ❌ 只有"完全相同的代码片段在多处复制粘贴"才报告为重复代码
+
+🔍 **行号推断规则（必须遵守）**：
+
+⚠️ **关键原则**：行号必须精确到具体代码行，不能是整个类或文件的笼统位置！
+
+| 问题类型 | 精确行号定位 |
+|---------|-------------|
+| API 调用缺少参数 | API 调用的那一行 |
+| 缺少 try-catch | 函数定义行 |
+| 缺少参数验证 | 函数参数定义后的第一行逻辑代码 |
+| 空值格式错误 | 格式化方法内的 return 语句 |
+| 缺少 dispose() | Controller 类定义行 |
+| 字段显示缺失 | 数据绑定的代码行 |
+
+❌ **错误定位（不要这样）**：
+- line 为 0 → 无法定位
+- line 指向整个类定义 → 太笼统
+- line 指向文件开头 → 不相关
+
+✅ **正确定位（应该这样）**：
+- API 调用问题 → 调用 API 的那一行
+- 函数缺少错误处理 → 函数定义行
+- 格式化问题 → return 语句所在的行
+- 显示问题 → UI 组件使用数据的代码行
+
+🎯 **增强定位信息（location）- 提高 TODO 插入精度**：
+
+为了确保 TODO 添加到正确的位置，除了 \x60line\x60 字段外，还可以提供 \x60location\x60 对象：
+
+| 场景 | line | location 示例 | 说明 |
+|------|------|-------------|------|
+| 缺少空值处理 | 45 | \x60{"function": "build", "anchor": "return Text("}\x60 | 在 build 函数的 return Text( 之前插入 |
+| API 调用错误 | 78 | \x60{"function": "fetchUsers", "anchor": "api.call("}\x60 | 在 fetchUsers 函数的 api.call( 之前插入 |
+| 类缺少方法 | 12 | \x60{"class": "MyController", "insertPosition": "after"}\x60 | 在类定义之后插入 |
+| 参数验证缺失 | 56 | \x60{"function": "handleSubmit", "anchor": "if (data", "insertPosition": "after"}\x60 | 在 if (data 之后插入 |
+
+**location 字段说明**：
+- \x60function\x60: 函数名，帮助定位到具体的函数
+- \x60class\x60: 类名，帮助定位到具体的类
+- \x60anchor\x60: 定位点文本，系统会搜索包含此文本的行
+- \x60insertPosition\x60: "before"（默认，在定位点前）、"after"（在定位点后）、"replace"（替换定位点）
+
+**示例**：
+\x60\x60\x60json
+{
+  "ruleId": "QA-FUNC-001",
+  "file": "E:\\\\project\\lib\\views\\page.dart",
+  "line": 45,
+  "location": {
+    "function": "build",
+    "anchor": "return Text(data?.name ?? '--');",
+    "insertPosition": "before"
+  },
+  "message": "建议添加空值检查",
+  "suggestion": "确保 data 不为 null"
+}
+\x60\x60\x60
+
+⚠️ **虽然 location 是可选的，但强烈建议提供，特别是对于复杂代码结构！**
+
+🚨 **特殊情况处理**：
+- **handelError/handleError 方法**：如果代码中已有 handelError 或 handleError 方法，检查其内部是否已有 switch-case 或 if-else 处理不同错误码
+  - ✅ 如果已有处理逻辑（如 switch 判断 409/404/500），不要报告"没有详细错误处理"
+  - ✅ 如果是错误提示文案不符合需求，应报告"错误文案不正确"而非"缺少错误处理"
+  - ✅ 报告位置应在方法定义的上一行（line = 方法定义行号 - 1）
+  - 📋 **强制**：检查到涉及界面文本/标签/提示信息时，必须调用 get_translations 工具获取多语言翻译进行比对验证
+- 如果公共方法被多处调用是正常的，不要报告为重复代码
+- 如果是工具函数/辅助方法，被多处调用是设计使然，不是问题
+- **跨维度去重**：同一代码位置的同一问题，只在一个维度中报告，不要重复
+
+📝 **输出示例（参考）**：
+
+✅ **好的问题示例**（基于实际代码检查）：
+\x60\x60\x60json
+{
+  "ruleId": "QA-FUNC-001",
+  "severity": "high",
+  "file": "E:\\2025\\project\\lib\\views\\account_list.dart",
+  "line": 45,
+  "message": "列表预期10笔分页，实际页面只显示9笔分页",
+  "suggestion": "检查 pageSize 参数设置，确保与需求一致"
+}
+\x60\x60\x60
+
+❌ **坏的问题示例**（不要这样输出）：
+\x60\x60\x60json
+{
+  "ruleId": "QA-FUNC-001",
+  "severity": "medium",
+  "file": "",
+  "line": 0,
+  "message": "需求中提到了账号验证状态，但没有详细说明验证机制",
+  "suggestion": "..."
+}
+\x60\x60\x60
+
+❌ **不要报告的问题**：
+- "需求中提到了...但没有详细说明"（这是评论需求，不是检查代码）
+- "API 文档中未明确指出..."（这是评论文档，不是检查代码）
+- "建议需求补充..."（需求评审不是代码审查的范围）
+
+🚨 **禁止的 JSON 格式**（会导致解析失败）：
+❌ **不要使用** "covered"/"missing" 数组格式：
+\x60\x60\x60json
+"requirementMatching": {
+  "covered": ["R1", "R2", "R3", ..., "R100", ...],  // ❌ 禁止！数组太大会导致解析失败
+  "missing": ["R5", "R10"]
+}
+\x60\x60\x60
+
+✅ **正确格式**（使用计数）：
+\x60\x60\x60json
+"requirementMatching": {
+  "status": "partial",
+  "score": 85,
+  "totalRequirements": 100,
+  "implementedCount": 85,
+  "missingCount": 15,
+  "issues": [...]  // 只列出有问题的需求
+}
+\x60\x60\x60
+
+**重要提示**：
+- 使用工具按需读取文件，不要假设文件内容
+- 优先读取核心业务逻辑文件（view/controller/model）
+- 只有在需要时才读取配置类文件
+- 确保同一功能的 View、Controller、Provider 一起审查
+- 发现问题后直接输出 JSON，不需要继续读取更多文件
+
+🚨 **最后强调：line 字段必须大于 0！**
+- 绝对不要输出 "line": 0 或 line 等于 0 的值
+- 对于"缺少"类问题，定位到应该添加代码的函数/类定义行
+- 例如：缺少 try-catch → 定位到函数定义行；缺少 dispose() → 定位到 Controller 类定义行
+- 只有 line 大于 0 的问题才能被系统正确处理和添加 TODO 注释
+
+🛑 **审查完成条件**（满足以下条件即输出 JSON）：
+1. 已读取 View 文件并追踪了所有数据引用到 Controller/API
+2. 已使用 get_file_summary 获取参考文件和组件的签名
+3. 所有需求提到的格式/显示要求已逐行验证
+4. 已发现的问题已整理完毕`;
+
+    // 开始多轮对话
+    // GLM-5 使用 tools 时必须至少有一个 user 消息
+    let messages = [
+      { role: 'system', content: systemPrompt },
+      {
+        role: 'user',
+        content: `请开始审查。先使用 read_file 读取【主要文件】中的 View 文件，追踪数据引用，再读取 Controller/API 文件。`
+      }
+    ];
+
+    const maxTurns = 15; // 最多 15 轮对话（10轮太少，20轮过多）
+    const maxRetries = 3; // 429 错误最大重试次数
+    let finalContent = null;
+
+    for (let turn = 1; turn <= maxTurns; turn++) {
+      console.log(`[SegmentExecutor] Function Calling 第 ${turn}/${maxTurns} 轮...`);
+      _dl(`[checkRequirementsWithTools] 第 ${turn}/${maxTurns} 轮`);
+
+      // 发送请求（带 429 重试机制）
+      let response;
+      let retryCount = 0;
+
+      while (retryCount <= maxRetries) {
+        _dl('[checkRequirementsWithTools] 调用 llm.chat...');
+        response = await this.llm.chat('code_analysis', messages, {
+          temperature: 0.3,
+          maxTokens: 16000,
+          tools: tools,
+          toolChoice: 'auto'
+        });
+
+        // 检查是否成功
+        if (response.success) {
+          _dl('[checkRequirementsWithTools] llm.chat 成功, hasToolCalls=' + !!(response.toolCalls?.length) + ', contentLen=' + (response.content?.length || 0));
+          break; // 成功，跳出重试循环
+        }
+
+        _dl('[checkRequirementsWithTools] llm.chat 失败: ' + (response.error || 'unknown'));
+
+        // 检查是否是 429 速率限制错误
+        const errorMsg = response.error || '';
+        const isRateLimitError = errorMsg.includes('429') ||
+                               errorMsg.includes('速率限制') ||
+                               response.errorStatus === 429;
+
+        if (isRateLimitError && retryCount < maxRetries) {
+          retryCount++;
+          const waitTime = 30 * retryCount; // 递增等待时间：30s, 60s, 90s
+          console.warn(`[SegmentExecutor] 遇到 429 速率限制，第 ${retryCount}/${maxRetries} 次重试，等待 ${waitTime} 秒...`);
+
+          // 发送进度通知
+          if (this.onProgress) {
+            this.onProgress({
+              type: 'rate-limit',
+              stage: 'rate-limit',
+              message: `遇到速率限制，等待 ${waitTime} 秒后重试 (${retryCount}/${maxRetries})...`,
+              segmentIndex: segment.index || 0,
+              totalSegments: segment.totalSegments || 1
+            });
+          }
+
+          // 检查是否被取消
+          if (global.qaReviewerCancelled) {
+            console.log('[SegmentExecutor] 用户取消了审查（等待重试时）');
+            return {
+              issues: [],
+              summary: '用户取消了审查',
+              error: '用户取消',
+              cancelled: true
+            };
+          }
+
+          await new Promise(resolve => setTimeout(resolve, waitTime * 1000));
+          continue;
+        }
+
+        // 非 429 错误或重试次数用尽，返回失败
+        break;
+      }
+
+      if (!response || !response.success) {
+        const errMsg = response?.error || '未知错误';
+        _dl('[checkRequirementsWithTools] AI 调用失败（致命）: ' + errMsg);
+        return {
+          issues: [],
+          summary: 'AI 调用失败: ' + errMsg,
+          error: errMsg,
+          fatal: true
+        };
+      }
+
+      // 获取 AI 的响应消息
+      const assistantMessage = {
+        role: 'assistant',
+        content: response.content || null,
+        tool_calls: response.toolCalls || null,
+        rawContentBlocks: response.rawContentBlocks || null
+      };
+      messages.push(assistantMessage);
+
+      // 如果没有工具调用，说明 AI 完成了分析
+      if (!response.toolCalls || response.toolCalls.length === 0) {
+        finalContent = response.content;
+        console.log('[SegmentExecutor] AI 完成分析，未请求更多工具');
+        break;
+      }
+
+      // 执行所有工具调用
+      console.log(`[SegmentExecutor] 收到 ${response.toolCalls.length} 个工具调用请求`);
+
+      for (const toolCall of response.toolCalls) {
+        const result = await this.executeToolCall(toolCall, segment, context);
+
+        // 添加工具响应消息
+        messages.push({
+          role: 'tool',
+          tool_call_id: toolCall.id,
+          content: JSON.stringify(result)
+        });
+      }
+
+      // 去重重复读取的文件内容（保留所有 AI 推理消息）
+      const dedupedMessages = this.deduplicateToolResults(messages);
+      if (dedupedMessages.length < messages.length) {
+        console.log(`[SegmentExecutor] 去重后消息数: ${messages.length} → ${dedupedMessages.length}`);
+        messages = dedupedMessages;
+      }
+
+      // 发送进度更新
+      if (this.onProgress) {
+        this.onProgress({
+          type: 'progress',
+          stage: 'analyzing',
+          message: `AI 正在分析文件... (第 ${turn + 1} 轮)`,
+          segmentIndex: segment.index || 0,
+          totalSegments: segment.totalSegments || 1,
+          percent: Math.min((turn + 1) * 5, 95)
+        });
+      }
+
+      // 检查是否被取消
+      if (global.qaReviewerCancelled) {
+        return {
+          issues: [],
+          summary: '用户取消了审查',
+          error: '用户取消',
+          cancelled: true
+        };
+      }
+    }
+
+    // 如果达到最大轮次还没有完成
+    if (!finalContent && messages[messages.length - 1].role === 'assistant') {
+      finalContent = messages[messages.length - 1].content;
+      console.warn('[SegmentExecutor] 达到最大对话轮次，使用最后的响应');
+    }
+
+    if (!finalContent) {
+      return {
+        issues: [],
+        summary: 'AI 未返回分析结果',
+        error: 'AI 未返回分析结果'
+      };
+    }
+
+    // 解析响应
+    _dl('[checkRequirementsWithTools] 开始解析响应, contentLen=' + (finalContent?.length || 0));
+    return this.parseResponse(finalContent);
+  }
+
+  /**
+   * 推断文件类型（辅助方法）
+   */
+  inferFileType(filePath, projectType = 'flutter') {
+    const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+    const fileName = require('path').basename(filePath).toLowerCase();
+    const ext = require('path').extname(filePath).toLowerCase();
+
+    // 测试文件
+    if (fileName.includes('.test.') || fileName.includes('.spec.') ||
+        fileName.includes('_test.') || fileName.endsWith('_test.dart') ||
+        normalizedPath.includes('/test/') || normalizedPath.includes('/tests/')) {
+      return 'test';
+    }
+
+    // 生成的文件
+    if (fileName.includes('.generated.') || fileName.includes('.g.') ||
+        fileName.includes('.freezed.') || fileName.includes('.mock.')) {
+      return 'generated';
+    }
+
+    // i18n/多语言文件检测（通用，适用于所有项目类型）
+    if (normalizedPath.includes('/lang/') || normalizedPath.includes('/locale/') ||
+        normalizedPath.includes('/locales/') || normalizedPath.includes('/i18n/') ||
+        normalizedPath.includes('/l10n/') || normalizedPath.includes('/translations/') ||
+        normalizedPath.includes('/intl/')) {
+      return 'i18n';
+    }
+    // Flutter 特定 i18n 路径
+    if (projectType === 'flutter' &&
+        (normalizedPath.includes('/lib/l10n/') || normalizedPath.includes('/lib/i18n/') ||
+         normalizedPath.includes('/lib/lang/'))) {
+      return 'i18n';
+    }
+    // Vue/React/Angular 特定 i18n 路径
+    if ((projectType === 'vue' || projectType === 'react' || projectType === 'angular') &&
+        (normalizedPath.includes('/src/locales/') || normalizedPath.includes('/src/i18n/') ||
+         normalizedPath.includes('/src/lang/'))) {
+      return 'i18n';
+    }
+    // Angular 特定 i18n 路径
+    if (projectType === 'angular' &&
+        (normalizedPath.includes('/assets/i18n/') || normalizedPath.includes('/assets/locales/') ||
+         normalizedPath.includes('/src/locale/'))) {
+      return 'i18n';
+    }
+
+    // 根据项目类型推断
+    if (projectType === 'flutter') {
+      // 🔥 优先检查：明确的路径关键词（同时支持单数和复数形式）
+      if (normalizedPath.includes('/pages/') || normalizedPath.includes('/views/') ||
+          normalizedPath.includes('/view/') || normalizedPath.includes('/screens/')) {
+        return 'view';
+      }
+      if (normalizedPath.includes('/controllers/') || normalizedPath.includes('/controller/') ||
+          normalizedPath.includes('/viewmodels/')) {
+        return 'controller';
+      }
+      if (normalizedPath.includes('/models/') || normalizedPath.includes('/model/') ||
+          normalizedPath.includes('/entities/')) {
+        return 'model';
+      }
+      // Binding/依赖注入文件
+      if (normalizedPath.includes('/bindings/') || normalizedPath.includes('/binding/') ||
+          normalizedPath.includes('/di/')) {
+        return 'binding';
+      }
+      if (fileName.endsWith('_binding.dart') || fileName.includes('binding.')) {
+        return 'binding';
+      }
+      if (normalizedPath.includes('/services/') || normalizedPath.includes('/service/') ||
+          normalizedPath.includes('/providers/') || normalizedPath.includes('/repositories/')) {
+        return 'service';
+      }
+      if (normalizedPath.includes('/widgets/') || normalizedPath.includes('/components/')) {
+        return 'component';
+      }
+      if (normalizedPath.includes('/api/') || normalizedPath.includes('/datasources/') ||
+          normalizedPath.includes('/https/')) {
+        return 'api';
+      }
+
+      // 🔥 次级检查：根据文件名模式推断（处理不在标准目录的文件）
+      // Controller 文件通常以 _controller.dart 结尾或包含 controller
+      if (fileName.endsWith('_controller.dart') || fileName.includes('controller.') ||
+          fileName.endsWith('_provider.dart') || fileName.includes('provider.')) {
+        return 'controller';
+      }
+      // View/Pages 文件通常以 page.dart 或 screen.dart 结尾
+      if (fileName.endsWith('_page.dart') || fileName.endsWith('_screen.dart') ||
+          fileName.endsWith('.page.dart') || fileName.endsWith('.screen.dart')) {
+        return 'view';
+      }
+      // Model 文件
+      if (fileName.endsWith('_model.dart') || fileName.endsWith('.model.dart')) {
+        return 'model';
+      }
+      // API/Service 文件
+      if (fileName.endsWith('_api.dart') || fileName.endsWith('_service.dart') ||
+          fileName.endsWith('_repository.dart')) {
+        return 'api';
+      }
+      // Component/Widget 文件
+      if (fileName.endsWith('_widget.dart') || fileName.endsWith('.widget.dart') ||
+          fileName.endsWith('_component.dart')) {
+        return 'component';
+      }
+    }
+
+    return 'other';
+  }
+
+  /**
+   * 判断文件是否是公共/共享文件（被多个模块使用）
+   */
+  isSharedFile(filePath, projectType = 'flutter') {
+    const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+    const fileName = filePath.split(/[/\\]/).pop().toLowerCase();
+
+    // Binding 文件通常是共享的（连接多个模块）
+    if (normalizedPath.includes('/bindings/') || normalizedPath.includes('/binding/') ||
+        normalizedPath.includes('/di/') ||
+        fileName.endsWith('_binding.dart') || fileName.includes('binding.')) {
+      return true;
+    }
+
+    // 通用工具/service/公共组件文件
+    if (normalizedPath.includes('/common/') || normalizedPath.includes('/shared/') ||
+        normalizedPath.includes('/utils/') || normalizedPath.includes('/helpers/')) {
+      return true;
+    }
+
+    // Scaffold/布局框架文件（被所有页面共用）
+    if (fileName.includes('scaffold') || fileName.includes('layout') ||
+        fileName.includes('app_bar') || fileName.includes('nav_bar')) {
+      return true;
+    }
+
+    // 错误处理/全局拦截文件
+    if (fileName.includes('error_handler') || fileName.includes('error_handel') ||
+        fileName.includes('interceptor') || fileName.includes('middleware')) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * 解析 i18n 文件，返回扁平化的键值对数组
+   */
+  parseI18nFile(filePath, projectType = 'flutter') {
+    const fs = require('fs');
+    const path = require('path');
+    const ext = path.extname(filePath).toLowerCase();
+
+    try {
+      const content = fs.readFileSync(filePath, 'utf-8');
+      switch (ext) {
+        case '.json':
+          return this.parseJsonI18n(content);
+        case '.dart':
+          return this.parseDartI18n(content);
+        case '.arb':
+          return this.parseArbI18n(content);
+        case '.yaml':
+        case '.yml':
+          return this.parseYamlI18n(content);
+        default:
+          try { return this.parseJsonI18n(content); } catch { return this.parseDartI18n(content); }
+      }
+    } catch (error) {
+      console.error(`[SegmentExecutor] 解析 i18n 文件失败: ${filePath}`, error.message);
+      return [];
+    }
+  }
+
+  /**
+   * 解析 Dart 格式的 i18n 文件
+   * 格式: class LangZh { Map<String, dynamic> langs = { "key": "value", ... }; }
+   */
+  parseDartI18n(content) {
+    const results = [];
+
+    // 提取 langs = { ... } 或 translations = { ... } 中的内容
+    const mapPattern = /(?:langs|translations|messages|strings|keys)\s*=\s*(?:<[^>]+>\s*)?\{/g;
+    let match;
+    while ((match = mapPattern.exec(content)) !== null) {
+      const startPos = match.index + match[0].length - 1;
+      const mapContent = this.extractBalancedBraces(content, startPos);
+      if (!mapContent) continue;
+
+      // 递归提取嵌套 Map 中的键值对
+      this._extractDartPairs(mapContent, '', results);
+    }
+
+    // 如果上面的模式没匹配到，尝试简单模式
+    if (results.length === 0) {
+      // 匹配 'key': 'value' 和 "key": "value"
+      const simplePattern = /['"]([^'"]+)['"]\s*:\s*['"]([^'"]*?)['"]/g;
+      let simpleMatch;
+      while ((simpleMatch = simplePattern.exec(content)) !== null) {
+        results.push({ key: simpleMatch[1], value: simpleMatch[2] });
+      }
+    }
+
+    // 去重
+    const seen = new Set();
+    return results.filter(r => {
+      if (seen.has(r.key)) return false;
+      seen.add(r.key);
+      return true;
+    });
+  }
+
+  /**
+   * 递归提取 Dart Map 中的键值对，处理嵌套
+   */
+  _extractDartPairs(mapContent, prefix, results) {
+    // 匹配 'key': 'value' 和 "key": "value"（单引号和双引号混合）
+    const kvPattern = /['"]([^'"]+)['"]\s*:\s*['"]([^'"]*?)['"]/g;
+    let kvMatch;
+    while ((kvMatch = kvPattern.exec(mapContent)) !== null) {
+      const key = prefix ? `${prefix}.${kvMatch[1]}` : kvMatch[1];
+      results.push({ key, value: kvMatch[2] });
+    }
+
+    // 处理嵌套 Map：匹配 "parent": { ... } 或 'parent': { ... }
+    const nestedPattern = /['"]([^'"]+)['"]\s*:\s*\{/g;
+    let nestedMatch;
+    while ((nestedMatch = nestedPattern.exec(mapContent)) !== null) {
+      const parentKey = prefix ? `${prefix}.${nestedMatch[1]}` : nestedMatch[1];
+      // 找到对应的闭合 }
+      const braceStart = mapContent.indexOf('{', nestedMatch.index + nestedMatch[0].length - 1);
+      if (braceStart === -1) continue;
+      const nestedContent = this.extractBalancedBraces(mapContent, braceStart);
+      if (!nestedContent) continue;
+
+      this._extractDartPairs(nestedContent, parentKey, results);
+    }
+  }
+
+  /**
+   * 解析 JSON 格式的 i18n 文件
+   */
+  parseJsonI18n(content) {
+    const parsed = JSON.parse(content);
+    return this.flattenTranslations(parsed);
+  }
+
+  /**
+   * 解析 ARB 格式 (Flutter localization)，过滤 @@ 元数据键
+   */
+  parseArbI18n(content) {
+    const parsed = JSON.parse(content);
+    const results = [];
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!key.startsWith('@')) {
+        results.push({ key, value: String(value) });
+      }
+    }
+    return results;
+  }
+
+  /**
+   * 简易 YAML 解析（不依赖外部库）
+   */
+  parseYamlI18n(content) {
+    const results = [];
+    const lines = content.split('\n');
+    for (const line of lines) {
+      if (!line.trim() || line.trim().startsWith('#')) continue;
+      const kvMatch = line.match(/^(\s*)([\w.-]+)\s*:\s*"?(.*?)"?\s*$/);
+      if (kvMatch && kvMatch[3]) {
+        results.push({ key: kvMatch[2], value: kvMatch[3] });
+      }
+    }
+    return results;
+  }
+
+  /**
+   * 递归展平嵌套翻译对象
+   */
+  flattenTranslations(obj, prefix = '') {
+    const results = [];
+    for (const [key, value] of Object.entries(obj)) {
+      const fullKey = prefix ? `${prefix}.${key}` : key;
+      if (typeof value === 'string') {
+        results.push({ key: fullKey, value });
+      } else if (typeof value === 'object' && value !== null) {
+        results.push(...this.flattenTranslations(value, fullKey));
+      }
+    }
+    return results;
+  }
+
+  /**
+   * 过滤翻译结果
+   */
+  filterTranslations(translations, keys, search) {
+    if (!keys && !search) {
+      return translations.slice(0, 300);
+    }
+
+    let filtered = translations;
+
+    if (keys && keys.length > 0) {
+      filtered = filtered.filter(t =>
+        keys.includes(t.key) ||
+        keys.some(k => t.key.startsWith(k + '.') || t.key.endsWith('.' + k))
+      );
+    }
+
+    if (search) {
+      const searchLower = search.toLowerCase();
+      filtered = filtered.filter(t =>
+        t.key.toLowerCase().includes(searchLower) ||
+        t.value.toLowerCase().includes(searchLower)
+      );
+    }
+
+    return filtered.slice(0, 300);
+  }
+
+  /**
+   * 从文件路径检测语言代码
+   */
+  detectLanguageFromPath(filePath) {
+    const path = require('path');
+    const basename = path.basename(filePath, path.extname(filePath));
+    const langMatch = basename.match(/^([a-z]{2,3}(?:_[A-Z]{2})?)$/i);
+    return langMatch ? langMatch[1] : basename;
+  }
+
+  /**
+   * 提取平衡的大括号内容
+   */
+  extractBalancedBraces(content, startBraceIndex) {
+    let depth = 0;
+    let inString = false;
+    let escapeNext = false;
+
+    for (let i = startBraceIndex; i < content.length; i++) {
+      const ch = content[i];
+
+      if (escapeNext) { escapeNext = false; continue; }
+      if (ch === '\\') { escapeNext = true; continue; }
+      if (ch === "'") {
+        // Dart 单引号字符串
+        inString = !inString;
+        continue;
+      }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+
+      if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) {
+          return content.substring(startBraceIndex + 1, i);
+        }
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 为代码内容添加行号前缀
+   * 格式: "   1 | code line"
+   */
+  addLineNumbers(content) {
+    const lines = content.split('\n');
+    return lines.map((line, i) => {
+      const num = String(i + 1).padStart(4, ' ');
+      return `${num} | ${line}`;
+    }).join('\n');
+  }
+
+  /**
+   * 清理 JSON 字符串（处理常见格式问题）
+   */
+  cleanJsonString(jsonStr) {
+    let cleaned = jsonStr;
+
+    // 移除单行注释 // ...
+    cleaned = cleaned.replace(/\/\/[^\n]*\n/g, '\n');
+
+    // 移除多行注释 /* ... */
+    cleaned = cleaned.replace(/\/\*[\s\S]*?\*\//g, '');
+
+    // 移除尾随逗号（在 } 或 ] 前的 ,）
+    cleaned = cleaned.replace(/,\s*([}\]])/g, '$1');
+
+    // 修复非法 JSON 转义字符
+    // 只允许 \" \\ \/ \b \f \n \r \t \uXXXX
+    // 用交替匹配：先匹配合法的 \\（保留不动），再匹配非法的 \X（转义为 \\X）
+    cleaned = cleaned.replace(/\\\\|\\(?!["\\\/bfnrtu])/g, function(match) {
+      if (match.length === 2) return match; // \\ 已是合法转义，保留
+      return '\\\\'; // 单个 \ 后跟非法字符，加一个 \ 转义
+    });
+
+    // 修复无效的 Unicode 转义 \uXXXX（X 不是4位十六进制）
+    // 将 \u 后跟非十六进制的情况转义为 \\u
+    cleaned = cleaned.replace(/\\u(?![0-9a-fA-F]{4})/g, function() {
+      return '\\\\u';
+    });
+
+    // 清理控制字符（保留 \t \n \r，它们在 JSON 值中需被转义但如果出现原始控制字符则移除）
+    cleaned = cleaned.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+    // 移除行首行尾空格
+    cleaned = cleaned.trim();
+
+    return cleaned;
+  }
+
+  /**
+   * 带自修复的 JSON 解析
+   * 当 JSON.parse 失败时，根据错误位置逐步修复问题字符
+   */
+  parseJsonWithRepair(jsonStr) {
+    // 第一次直接尝试
+    try {
+      return JSON.parse(jsonStr);
+    } catch (firstError) {
+      console.warn('[SegmentExecutor] 首次 JSON 解析失败:', firstError.message);
+    }
+
+    // 策略1：文本剥离 - 提取 { } 之间的纯JSON部分
+    const firstBrace = jsonStr.indexOf('{');
+    const lastBrace = jsonStr.lastIndexOf('}');
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      const stripped = jsonStr.substring(firstBrace, lastBrace + 1);
+      try {
+        return JSON.parse(stripped);
+      } catch (e) { /* 继续下一步修复 */ }
+    }
+
+    // 策略2：截断修复 - 检测不闭合的括号栈，自动闭合
+    const openBrackets = { '{': '}', '[': ']' };
+    const closeBrackets = { '}': '{', ']': '[' };
+    let bracketStack = [];
+    let inString = false;
+    let escapeNext = false;
+
+    for (let i = 0; i < jsonStr.length; i++) {
+      const ch = jsonStr[i];
+      if (escapeNext) { escapeNext = false; continue; }
+      if (ch === '\\' && inString) { escapeNext = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (!inString) {
+        if (ch in openBrackets) bracketStack.push(ch);
+        if (ch in closeBrackets) {
+          if (bracketStack.length > 0 && bracketStack[bracketStack.length - 1] === closeBrackets[ch]) {
+            bracketStack.pop();
+          }
+        }
+      }
+    }
+
+    if (bracketStack.length > 0 && firstBrace >= 0 && lastBrace >= 0) {
+      let truncatedRepair = jsonStr.substring(firstBrace, lastBrace + 1);
+      // 移除尾部可能的不完整内容
+      const lastComma = truncatedRepair.lastIndexOf(',');
+      const lastColon = truncatedRepair.lastIndexOf(':');
+      const lastBadPos = Math.max(lastComma, lastColon);
+      if (lastBadPos > truncatedRepair.length - 30 && lastBadPos > 0) {
+        truncatedRepair = truncatedRepair.substring(0, lastBadPos);
+      }
+      // 闭合所有未闭合的括号
+      while (bracketStack.length > 0) {
+        truncatedRepair += openBrackets[bracketStack.pop()];
+      }
+      console.log('[SegmentExecutor] JSON截断修复: 添加闭合括号');
+      try {
+        return JSON.parse(truncatedRepair);
+      } catch (e) {
+        console.warn('[SegmentExecutor] 截断修复失败:', e.message);
+      }
+    }
+
+    // 策略3：逐步字符级修复
+    let repaired = jsonStr;
+    let lastError = null;
+
+    for (let attempt = 0; attempt < 30; attempt++) {
+      lastError = null;
+      try {
+        return JSON.parse(repaired);
+      } catch (e) {
+        lastError = e;
+        const posMatch = e.message.match(/position\s+(\d+)/);
+        if (!posMatch) {
+          console.warn(`[SegmentExecutor] JSON 修复终止: 无法定位错误位置 - ${e.message}`);
+          break;
+        }
+
+        const pos = parseInt(posMatch[1]);
+        const char = repaired[pos];
+        const prevChar = pos > 0 ? repaired[pos - 1] : '';
+        const context = repaired.substring(Math.max(0, pos - 20), pos + 20);
+
+        console.log(`[SegmentExecutor] JSON 修复 #${attempt + 1}: 位置 ${pos}, 字符 "${char}" (${char?.charCodeAt(0)}), 前一字符 "${prevChar}" (${prevChar?.charCodeAt(0)}), 上下文 "...${context}..."`);
+
+        if (pos >= repaired.length) {
+          console.warn('[SegmentExecutor] JSON 修复终止: 错误位置超出字符串长度');
+          break;
+        }
+
+        // "Bad escaped character" 错误：位置指向非法字符（如 \s 中的 s），不是反斜杠
+        // 需要检查前一个字符是否是反斜杠
+        if (prevChar === '\\' && e.message.includes('escaped')) {
+          // 非法转义序列 \X：在反斜杠前再加一个反斜杠，使 \s 变成 \\s
+          repaired = repaired.substring(0, pos - 1) + '\\' + repaired.substring(pos - 1);
+        } else if (prevChar === 'u' && pos >= 2 && repaired[pos - 2] === '\\' && e.message.includes('Unicode')) {
+          // 无效 Unicode 转义 \uXXXX（X 不是十六进制）：将 \u 转义为 \\u
+          repaired = repaired.substring(0, pos - 2) + '\\' + repaired.substring(pos - 2);
+        } else if (char === '\\') {
+          // 反斜杠本身在错误位置：转义它
+          repaired = repaired.substring(0, pos) + '\\' + repaired.substring(pos);
+        } else if (char === "'" || char === '`') {
+          // 单引号或反引号替换为双引号
+          repaired = repaired.substring(0, pos) + '"' + repaired.substring(pos + 1);
+        } else if (char && char.charCodeAt(0) < 0x20) {
+          // 控制字符：移除
+          repaired = repaired.substring(0, pos) + repaired.substring(pos + 1);
+        } else {
+          // 其他未知问题：尝试移除该字符
+          console.warn(`[SegmentExecutor] JSON 修复: 未知问题字符 "${char}", 尝试移除`);
+          repaired = repaired.substring(0, pos) + repaired.substring(pos + 1);
+        }
+      }
+    }
+
+    throw lastError || new Error('JSON 修复失败');
+  }
+
+  /**
+   * 解析 AI 响应（支持 JSON 格式）
+   */
+  parseResponse(response) {
+    const issues = [];
+    let summary = '';
+    let requirementInfo = null;  // 新增：需求匹配信息
+    let contractIssues = [];      // 新增：规则检查问题
+    let optimizationSuggestions = []; // 新增：优化建议
+
+    console.log('[SegmentExecutor] 原始响应长度:', response?.length || 0);
+
+    // 保存原始响应到文件（用于调试）
+    try {
+      const fs = require('fs');
+      const pathMod = require('path');
+      const os = require('os');
+      const logDir = pathMod.join(os.tmpdir(), 'qa-raw-responses');
+      if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+      const logFile = pathMod.join(logDir, `response-${Date.now()}.json`);
+      fs.writeFileSync(logFile, response || '', 'utf8');
+      console.log('[SegmentExecutor] 原始响应已保存:', logFile);
+    } catch (e) { /* 忽略保存失败 */ }
+
+    // 尝试解析 JSON 格式
+    try {
+      // 提取 JSON 代码块
+      let jsonStr = response;
+
+      // 检查是否包含 ```json ``` 代码块
+      const jsonMatch = response.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[1];
+        console.log('[SegmentExecutor] 从 ```json 代码块提取 JSON');
+      } else {
+        // 尝试查找 { ... } 模式（找到最外层的完整 JSON）
+        const braceMatch = response.match(/\{[\s\S]*\}/);
+        if (braceMatch) {
+          jsonStr = braceMatch[0];
+          console.log('[SegmentExecutor] 从 { } 块提取 JSON');
+        }
+      }
+
+      // 清理 JSON 字符串
+      jsonStr = this.cleanJsonString(jsonStr);
+
+      console.log('[SegmentExecutor] 清理后 JSON 前 300 字符:', jsonStr.substring(0, 300));
+
+      // 尝试解析（带自修复）
+      const result = this.parseJsonWithRepair(jsonStr);
+      console.log('[SegmentExecutor] JSON 解析成功');
+
+      return this.processParsedResult(result);
+    } catch (e) {
+      console.error('[SegmentExecutor] JSON 解析最终失败:', e.message);
+      console.error('[SegmentExecutor] ============ 原始响应内容 ============');
+      console.error(response || '空响应');
+      console.error('[SegmentExecutor] ============ 响应结束 ============');
+
+      // 尝试文本格式解析
+      console.log('[SegmentExecutor] 尝试文本格式解析...');
+      const textResult = this.parseTextFormat(response);
+      console.log('[SegmentExecutor] 文本格式解析结果:', textResult.issues.length, '个问题');
+      return textResult;
+    }
+  }
+
+  /**
+   * 处理已解析的 JSON 结果（五维对齐审查架构）
+   */
+  processParsedResult(result) {
+    const issues = [];
+    let summary = '';
+    let requirementInfo = null;
+    let contractResult = null;
+    let robustnessResult = null;
+    let securityResult = null;
+    let optimizationResult = null;
+    let accessibilityResult = null;
+    let compatibilityResult = null;
+    let performanceResult = null;
+    let maintainabilityResult = null;
+
+    // 提取摘要
+    if (result.summary) {
+      summary = result.summary.comment || result.summary.overallStatus || '审查完成';
+    }
+
+    // 维度 1: Requirement Matching（需求匹配）
+    if (result.requirementMatching) {
+      requirementInfo = result.requirementMatching;
+      console.log('[SegmentExecutor] 需求匹配原始数据:', JSON.stringify(requirementInfo).substring(0, 500));
+
+      // 新格式：处理 requirementMatching.issues 数组
+      if (requirementInfo.issues && Array.isArray(requirementInfo.issues)) {
+        console.log('[SegmentExecutor] 需求匹配中发现', requirementInfo.issues.length, '个问题');
+        let addedCount = 0;
+        let skippedCount = 0;
+        for (const issue of requirementInfo.issues) {
+          // 只处理有文件路径和行号的问题
+          if (issue.file && issue.file.trim() && issue.line && issue.line > 0) {
+            issues.push({
+              ruleId: issue.ruleId || 'QA-REQ-001',
+              severity: issue.severity || (issue.status === 'failed' ? 'high' : 'medium'),
+              filePath: issue.file,
+              line: issue.line,
+              message: issue.message || issue.note || issue.requirement || '需求不符合',
+              suggestion: issue.suggestion || '请参考需求实现',
+              source: 'requirement-matching',
+              category: 'requirement',
+              dimension: 'requirementMatching'
+            });
+            addedCount++;
+          } else {
+            skippedCount++;
+            console.log('[SegmentExecutor] 需求问题被跳过:', {
+              file: issue.file,
+              line: issue.line,
+              message: (issue.message || issue.note || issue.requirement || '').substring(0, 100)
+            });
+          }
+        }
+        console.log(`[SegmentExecutor] 需求匹配: 添加 ${addedCount} 个，跳过 ${skippedCount} 个`);
+      }
+    }
+
+    // 维度 2: Contract Checking（契约检查）- 支持新旧格式
+    if (result.contractChecking) {
+      const contractIssues = [];
+      const cc = result.contractChecking;
+      console.log('[SegmentExecutor] 契约检查原始数据:', JSON.stringify(cc).substring(0, 500));
+
+      // 新格式：checklist 结构
+      if (cc.checklist) {
+        contractResult = {
+          status: cc.status || 'unknown',
+          score: cc.score || 0,
+          checklist: {}
+        };
+
+        let addedCount = 0;
+        let skippedCount = 0;
+        // 遍历所有检查项
+        for (const [checkKey, checkData] of Object.entries(cc.checklist)) {
+          if (checkData.issues && Array.isArray(checkData.issues)) {
+            for (const issue of checkData.issues) {
+              let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+              const processedIssue = {
+                ruleId: issue.ruleId || 'QA-CONT-001',
+                severity: issue.severity || 'medium',
+                filePath: cleanPath,
+                line: issue.line || 0,
+                message: issue.message || issue.description || '',
+                suggestion: issue.suggestion || '',
+                source: 'contract-checking',
+                category: 'contract',
+                dimension: 'contractChecking',
+                checklist: checkKey
+              };
+              contractIssues.push(processedIssue);
+              if (issue.line && issue.line > 0) {
+                addedCount++;
+              } else {
+                skippedCount++;
+                console.log('[SegmentExecutor] 契约问题行号无效:', {
+                  file: cleanPath,
+                  line: issue.line,
+                  message: (issue.message || '').substring(0, 100)
+                });
+              }
+            }
+          }
+          // 保存检查项状态
+          contractResult.checklist[checkKey] = {
+            description: checkData.description || '',
+            status: checkData.status || 'unknown',
+            issuesCount: checkData.issues?.length || 0
+          };
+        }
+        console.log(`[SegmentExecutor] 契约检查: 总共 ${contractIssues.length} 个，有效行号 ${addedCount} 个，无效 ${skippedCount} 个`);
+      }
+      // 旧格式：直接是 issues 数组（向后兼容）
+      else if (cc.issues && Array.isArray(cc.issues)) {
+        let addedCount = 0;
+        let skippedCount = 0;
+        for (const issue of cc.issues) {
+          let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+          contractIssues.push({
+            ruleId: issue.ruleId || 'QA-CONT-001',
+            severity: issue.severity || 'medium',
+            filePath: cleanPath,
+            line: issue.line || 0,
+            message: issue.message || issue.description || '',
+            suggestion: issue.suggestion || '',
+            source: 'contract-checking',
+            category: 'contract',
+            dimension: 'contractChecking'
+          });
+          if (issue.line && issue.line > 0) {
+            addedCount++;
+          } else {
+            skippedCount++;
+          }
+        }
+        contractResult = { issues: contractIssues };
+        console.log(`[SegmentExecutor] 契约检查(旧格式): 总共 ${contractIssues.length} 个，有效行号 ${addedCount} 个，无效 ${skippedCount} 个`);
+      }
+
+      console.log(`[SegmentExecutor] 契约检查: ${contractIssues.length} 个问题`);
+      issues.push(...contractIssues);
+    }
+
+    // 维度 3: Robustness Checking（健壮性检查）- 全新
+    if (result.robustnessChecking) {
+      const robustnessIssues = [];
+      const rc = result.robustnessChecking;
+
+      robustnessResult = {
+        status: rc.status || 'unknown',
+        score: rc.score || 0,
+        checklist: {}
+      };
+
+      if (rc.checklist) {
+        for (const [checkKey, checkData] of Object.entries(rc.checklist)) {
+          if (checkData.issues && Array.isArray(checkData.issues)) {
+            for (const issue of checkData.issues) {
+              let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+              robustnessIssues.push({
+                ruleId: issue.ruleId || 'QA-ROB-001',
+                severity: issue.severity || 'medium',
+                filePath: cleanPath,
+                line: issue.line || 0,
+                message: issue.message || issue.description || '',
+                suggestion: issue.suggestion || '',
+                source: 'robustness-checking',
+                category: 'robustness',
+                dimension: 'robustnessChecking',
+                checklist: checkKey
+              });
+            }
+          }
+          robustnessResult.checklist[checkKey] = {
+            description: checkData.description || '',
+            status: checkData.status || 'unknown',
+            issuesCount: checkData.issues?.length || 0
+          };
+        }
+      }
+
+      console.log(`[SegmentExecutor] 健壮性检查: ${robustnessIssues.length} 个问题`);
+      issues.push(...robustnessIssues);
+    }
+
+    // 维度 4: Security Checking（安全检查）- 全新
+    if (result.securityChecking) {
+      const securityIssues = [];
+      const sc = result.securityChecking;
+
+      securityResult = {
+        status: sc.status || 'unknown',
+        score: sc.score || 0,
+        checklist: {}
+      };
+
+      if (sc.checklist) {
+        for (const [checkKey, checkData] of Object.entries(sc.checklist)) {
+          if (checkData.issues && Array.isArray(checkData.issues)) {
+            for (const issue of checkData.issues) {
+              let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+              securityIssues.push({
+                ruleId: issue.ruleId || 'QA-SEC-001',
+                severity: issue.severity || 'high',
+                filePath: cleanPath,
+                line: issue.line || 0,
+                message: issue.message || issue.description || '',
+                suggestion: issue.suggestion || '',
+                source: 'security-checking',
+                category: 'security',
+                dimension: 'securityChecking',
+                checklist: checkKey
+              });
+            }
+          }
+          securityResult.checklist[checkKey] = {
+            description: checkData.description || '',
+            status: checkData.status || 'unknown',
+            issuesCount: checkData.issues?.length || 0
+          };
+        }
+      }
+
+      console.log(`[SegmentExecutor] 安全检查: ${securityIssues.length} 个问题`);
+      issues.push(...securityIssues);
+    }
+
+    // 维度 5: Optimization（优化建议）- 支持新旧格式
+    if (result.optimization) {
+      const optimizationIssues = [];
+      const opt = result.optimization;
+
+      // 新格式：checklist 结构
+      if (opt.checklist) {
+        optimizationResult = {
+          status: opt.status || 'unknown',
+          score: opt.score || 0,
+          checklist: {}
+        };
+
+        for (const [checkKey, checkData] of Object.entries(opt.checklist)) {
+          if (checkData.issues && Array.isArray(checkData.issues)) {
+            for (const issue of checkData.issues) {
+              let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+              optimizationIssues.push({
+                ruleId: issue.ruleId || 'QA-OPT-001',
+                severity: issue.severity || 'low',
+                filePath: cleanPath,
+                line: issue.line || 0,
+                message: issue.message || issue.description || '',
+                suggestion: issue.suggestion || '',
+                source: 'optimization',
+                category: 'optimization',
+                dimension: 'optimization',
+                checklist: checkKey
+              });
+            }
+          }
+          optimizationResult.checklist[checkKey] = {
+            description: checkData.description || '',
+            status: checkData.status || 'unknown',
+            issuesCount: checkData.issues?.length || 0
+          };
+        }
+      }
+      // 旧格式：直接是数组（向后兼容）
+      else if (Array.isArray(opt)) {
+        for (const issue of opt) {
+          let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+          optimizationIssues.push({
+            ruleId: issue.ruleId || 'QA-OPT-001',
+            severity: issue.severity || 'low',
+            filePath: cleanPath,
+            line: issue.line || 0,
+            message: issue.message || '优化建议',
+            suggestion: issue.suggestion || '改进方案',
+            source: 'optimization',
+            category: 'optimization',
+            dimension: 'optimization'
+          });
+        }
+        optimizationResult = optimizationIssues;
+      }
+
+      console.log(`[SegmentExecutor] 优化建议: ${optimizationIssues.length} 个`);
+      issues.push(...optimizationIssues);
+    }
+
+    // accessibility - 支持 checklist + 扁平两种格式
+    if (result.accessibility) {
+      const accessibilityIssues = [];
+      const dim = result.accessibility;
+      accessibilityResult = { status: dim.status || 'unknown', score: dim.score ?? 100, checklist: {} };
+
+      if (dim.checklist) {
+        for (const [checkKey, checkData] of Object.entries(dim.checklist)) {
+          if (checkData.issues && Array.isArray(checkData.issues)) {
+            for (const issue of checkData.issues) {
+              let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+              accessibilityIssues.push({
+                ruleId: issue.ruleId || 'QA-A11Y-001',
+                severity: issue.severity || 'medium',
+                filePath: cleanPath,
+                line: issue.line || 0,
+                message: issue.message || '',
+                suggestion: issue.suggestion || '',
+                source: 'accessibility',
+                category: 'accessibility',
+                dimension: 'accessibility',
+                checklist: checkKey
+              });
+            }
+          }
+        }
+      } else if (dim.issues && Array.isArray(dim.issues)) {
+        for (const issue of dim.issues) {
+          accessibilityIssues.push({
+            ruleId: issue.ruleId || 'QA-A11Y-001',
+            severity: issue.severity || 'medium',
+            filePath: issue.file || issue.filePath || '',
+            line: issue.line || 0,
+            message: issue.message || '',
+            suggestion: issue.suggestion || '',
+            source: 'accessibility',
+            category: 'accessibility',
+            dimension: 'accessibility'
+          });
+        }
+      }
+
+      // 提取 checklist 摘要
+      if (dim.checklist) {
+        for (const [k, v] of Object.entries(dim.checklist)) {
+          accessibilityResult.checklist[k] = { description: v.description || '', status: v.status || 'unknown', issuesCount: v.issues?.length || 0 };
+        }
+      }
+      console.log(`[SegmentExecutor] accessibility: ${accessibilityIssues.length} 个问题`);
+      issues.push(...accessibilityIssues);
+    }
+
+    // compatibility - 支持 checklist + 扁平两种格式
+    if (result.compatibility) {
+      const compatibilityIssues = [];
+      const dim = result.compatibility;
+      compatibilityResult = { status: dim.status || 'unknown', score: dim.score ?? 100, checklist: {} };
+
+      if (dim.checklist) {
+        for (const [checkKey, checkData] of Object.entries(dim.checklist)) {
+          if (checkData.issues && Array.isArray(checkData.issues)) {
+            for (const issue of checkData.issues) {
+              let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+              compatibilityIssues.push({
+                ruleId: issue.ruleId || 'QA-COMP-001',
+                severity: issue.severity || 'medium',
+                filePath: cleanPath,
+                line: issue.line || 0,
+                message: issue.message || '',
+                suggestion: issue.suggestion || '',
+                source: 'compatibility',
+                category: 'compatibility',
+                dimension: 'compatibility',
+                checklist: checkKey
+              });
+            }
+          }
+        }
+      } else if (dim.issues && Array.isArray(dim.issues)) {
+        for (const issue of dim.issues) {
+          compatibilityIssues.push({
+            ruleId: issue.ruleId || 'QA-COMP-001',
+            severity: issue.severity || 'medium',
+            filePath: issue.file || issue.filePath || '',
+            line: issue.line || 0,
+            message: issue.message || '',
+            suggestion: issue.suggestion || '',
+            source: 'compatibility',
+            category: 'compatibility',
+            dimension: 'compatibility'
+          });
+        }
+      }
+
+      if (dim.checklist) {
+        for (const [k, v] of Object.entries(dim.checklist)) {
+          compatibilityResult.checklist[k] = { description: v.description || '', status: v.status || 'unknown', issuesCount: v.issues?.length || 0 };
+        }
+      }
+      console.log(`[SegmentExecutor] compatibility: ${compatibilityIssues.length} 个问题`);
+      issues.push(...compatibilityIssues);
+    }
+
+    // performance - 支持 checklist + 扁平两种格式
+    if (result.performance) {
+      const performanceIssues = [];
+      const dim = result.performance;
+      performanceResult = { status: dim.status || 'unknown', score: dim.score ?? 100, checklist: {} };
+
+      if (dim.checklist) {
+        for (const [checkKey, checkData] of Object.entries(dim.checklist)) {
+          if (checkData.issues && Array.isArray(checkData.issues)) {
+            for (const issue of checkData.issues) {
+              let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+              performanceIssues.push({
+                ruleId: issue.ruleId || 'QA-PERF-001',
+                severity: issue.severity || 'medium',
+                filePath: cleanPath,
+                line: issue.line || 0,
+                message: issue.message || '',
+                suggestion: issue.suggestion || '',
+                source: 'performance',
+                category: 'performance',
+                dimension: 'performance',
+                checklist: checkKey
+              });
+            }
+          }
+        }
+      } else if (dim.issues && Array.isArray(dim.issues)) {
+        for (const issue of dim.issues) {
+          performanceIssues.push({
+            ruleId: issue.ruleId || 'QA-PERF-001',
+            severity: issue.severity || 'medium',
+            filePath: issue.file || issue.filePath || '',
+            line: issue.line || 0,
+            message: issue.message || '',
+            suggestion: issue.suggestion || '',
+            source: 'performance',
+            category: 'performance',
+            dimension: 'performance'
+          });
+        }
+      }
+
+      if (dim.checklist) {
+        for (const [k, v] of Object.entries(dim.checklist)) {
+          performanceResult.checklist[k] = { description: v.description || '', status: v.status || 'unknown', issuesCount: v.issues?.length || 0 };
+        }
+      }
+      console.log(`[SegmentExecutor] performance: ${performanceIssues.length} 个问题`);
+      issues.push(...performanceIssues);
+    }
+
+    // maintainability - 支持 checklist + 扁平两种格式
+    if (result.maintainability) {
+      const maintainabilityIssues = [];
+      const dim = result.maintainability;
+      maintainabilityResult = { status: dim.status || 'unknown', score: dim.score ?? 100, checklist: {} };
+
+      if (dim.checklist) {
+        for (const [checkKey, checkData] of Object.entries(dim.checklist)) {
+          if (checkData.issues && Array.isArray(checkData.issues)) {
+            for (const issue of checkData.issues) {
+              let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+              maintainabilityIssues.push({
+                ruleId: issue.ruleId || 'QA-MNT-001',
+                severity: issue.severity || 'medium',
+                filePath: cleanPath,
+                line: issue.line || 0,
+                message: issue.message || '',
+                suggestion: issue.suggestion || '',
+                source: 'maintainability',
+                category: 'maintainability',
+                dimension: 'maintainability',
+                checklist: checkKey
+              });
+            }
+          }
+        }
+      } else if (dim.issues && Array.isArray(dim.issues)) {
+        for (const issue of dim.issues) {
+          maintainabilityIssues.push({
+            ruleId: issue.ruleId || 'QA-MNT-001',
+            severity: issue.severity || 'medium',
+            filePath: issue.file || issue.filePath || '',
+            line: issue.line || 0,
+            message: issue.message || '',
+            suggestion: issue.suggestion || '',
+            source: 'maintainability',
+            category: 'maintainability',
+            dimension: 'maintainability'
+          });
+        }
+      }
+
+if (dim.checklist) {
+        for (const [k, v] of Object.entries(dim.checklist)) {
+          maintainabilityResult.checklist[k] = { description: v.description || '', status: v.status || 'unknown', issuesCount: v.issues?.length || 0 };
+        }
+      }
+      console.log(`[SegmentExecutor] maintainability: ${maintainabilityIssues.length} 个问题`);
+      issues.push(...maintainabilityIssues);
+    }
+
+    // 解析功能缺失问题（原有 issues 字段）
+    if (result.issues && Array.isArray(result.issues)) {
+      console.log('[SegmentExecutor] 通用 issues 字段:', result.issues.length, '个问题');
+      let addedCount = 0;
+      let skippedCount = 0;
+      for (const issue of result.issues) {
+        let cleanPath = (issue.file || issue.filePath || '').replace(/^\/\/\s*文件路径:\s*/, '').trim();
+        const ruleId = issue.ruleId || 'QA-FUNC-001';
+
+        // 根据规则 ID 分类
+        let source = 'ai-requirement';
+        let category = 'issue';
+        let dimension = issue.dimension || 'requirementMatching';
+
+        if (ruleId.startsWith('QA-CONT-')) {
+          source = 'contract-checking';
+          category = 'contract';
+          dimension = 'contractChecking';
+        } else if (ruleId.startsWith('QA-ROB-')) {
+          source = 'robustness-checking';
+          category = 'robustness';
+          dimension = 'robustnessChecking';
+        } else if (ruleId.startsWith('QA-SEC-')) {
+          source = 'security-checking';
+          category = 'security';
+          dimension = 'securityChecking';
+        } else if (ruleId.startsWith('QA-OPT-') || ruleId.startsWith('QA-ARCH-')) {
+          source = 'optimization';
+          category = 'optimization';
+          dimension = 'optimization';
+        }
+
+        const lineValue = issue.line || 0;
+        issues.push({
+          ruleId: ruleId,
+          severity: issue.severity || 'medium',
+          filePath: cleanPath,
+          line: lineValue,
+          message: issue.message || issue.description || '',
+          suggestion: issue.suggestion || '',
+          source: source,
+          category: category,
+          dimension: dimension,
+          checklist: issue.checklist || null
+        });
+
+        if (lineValue > 0) {
+          addedCount++;
+        } else {
+          skippedCount++;
+          console.log('[SegmentExecutor] 通用问题行号无效:', {
+            ruleId,
+            file: cleanPath,
+            line: lineValue,
+            message: (issue.message || '').substring(0, 100)
+          });
+        }
+      }
+      console.log(`[SegmentExecutor] 通用 issues: 总共 ${result.issues.length} 个，有效行号 ${addedCount} 个，无效 ${skippedCount} 个`);
+    }
+
+    // 从 contractResult 中提取问题到主 issues 数组
+    if (contractResult) {
+      if (contractResult.checklist) {
+        for (const checkData of Object.values(contractResult.checklist)) {
+          if (checkData.issues && Array.isArray(checkData.issues)) {
+            issues.push(...checkData.issues);
+          }
+        }
+      } else if (contractResult.issues) {
+        issues.push(...contractResult.issues);
+      }
+    }
+
+    // 检查所有问题的行号
+    issues.forEach(issue => {
+      if (issue.line <= 0) {
+        console.warn(`[SegmentExecutor] 问题 ${issue.ruleId} 行号为 ${issue.line}，TODO 可能无法添加`);
+      }
+      if (!issue.filePath) {
+        console.warn(`[SegmentExecutor] 问题 ${issue.ruleId} 缺少文件路径，TODO 无法添加`);
+      }
+    });
+
+    // 🔄 跨维度去重：同文件同行的问题，比较消息前缀重合度
+    // Line number correction: verify AI line numbers match actual code
+const fs2 = require("fs");
+const pathMod = require("path");
+let correctedCount = 0;
+for (const issue of issues) {
+  const fp = issue.filePath;
+  if (!fp || !fs2.existsSync(fp) || !issue.line || issue.line <= 0) continue;
+  try {
+    const content = fs2.readFileSync(fp, "utf8");
+    const fileLines = content.split(String.fromCharCode(10));
+    const actualCode = (fileLines[issue.line - 1] || "").trim();
+    const identifiers = (issue.message?.match(/[a-zA-Z_]w{2,}/g) || []).filter(id => id.length > 2);
+    const lowerActual = actualCode.toLowerCase();
+    const hasMatch = identifiers.some(id => lowerActual.includes(id.toLowerCase()));
+    if (!hasMatch && identifiers.length > 0) {
+      let bestLine = -1, bestScore = 0;
+      for (let i = 0; i < fileLines.length; i++) {
+        const lineLower = fileLines[i].toLowerCase();
+        let score = 0;
+        for (const id of identifiers) { if (lineLower.includes(id.toLowerCase())) score += 3; }
+        score -= Math.abs(i - (issue.line - 1)) * 0.3;
+        if (score > bestScore) { bestScore = score; bestLine = i + 1; }
+      }
+      if (bestScore >= 3 && bestLine > 0) {
+        const oldLine = issue.line;
+        issue.line = bestLine;
+        correctedCount++;
+        console.log("[SegmentExecutor] Line corrected: " + pathMod.basename(fp) + " L" + oldLine + " -> L" + bestLine + " (" + issue.ruleId + ")");
+      }
+    }
+  } catch (e) {}
+}
+if (correctedCount > 0) console.log("[SegmentExecutor] " + correctedCount + " line numbers corrected");
+
+const uniqueIssues = [];
+
+    // 跨维度去重：关键词 Jaccard 相似度 + ruleId 合并
+    const stopWords = new Set(['the', 'and', 'for', 'not', 'but', 'has', 'are', 'was', 'with',
+      'this', 'that', 'from', 'only', 'all', 'use', 'can', 'may', 'will', 'should', 'would',
+      'into', 'been', 'have', 'does', 'also', 'than', 'when', 'what', 'how', 'why', 'too',
+      'its', 'our', 'his', 'her', 'you', 'she', 'him', 'any', 'each', 'every', 'some', 'such']);
+
+    // 提取关键词
+    const extractKeywords = (msg) => {
+      if (!msg) return new Set();
+      return new Set(
+        (msg.match(/[a-zA-Z_]\w{2,}/g) || [])
+          .map(id => id.toLowerCase())
+          .filter(id => !stopWords.has(id) && id.length > 2)
+      );
+    };
+
+    // 计算 Jaccard 相似度
+    const jaccardSimilarity = (setA, setB) => {
+      if (setA.size === 0 || setB.size === 0) return { jaccard: 0, containment: 0, intersection: 0 };
+      let intersection = 0;
+      for (const k of setA) { if (setB.has(k)) intersection++; }
+      const union = setA.size + setB.size - intersection;
+      const jaccard = union === 0 ? 0 : intersection / union;
+      // 包含度：较小集合被较大集合覆盖的比例
+      const minSize = Math.min(setA.size, setB.size);
+      const containment = minSize === 0 ? 0 : intersection / minSize;
+      return { jaccard, containment, intersection };
+    };
+
+    // severity 优先级
+    const severityRank = { critical: 4, high: 3, medium: 2, low: 1 };
+    const higherSeverity = (a, b) => (severityRank[a] || 2) >= (severityRank[b] || 2) ? a : b;
+
+    // 按 file:line 分组（±3 行范围归为同组）
+    const fileGroups = new Map(); // filePath -> sorted issues by line
+    for (const issue of issues) {
+      const fp = issue.filePath || '';
+      if (!fileGroups.has(fp)) fileGroups.set(fp, []);
+      fileGroups.get(fp).push(issue);
+    }
+
+    for (const [fp, fileIssues] of fileGroups) {
+      // 按行号排序
+      fileIssues.sort((a, b) => (a.line || 0) - (b.line || 0));
+
+      // 合并 ±3 行范围内的问题为同组
+      const lineGroups = [];
+      let currentGroup = [fileIssues[0]];
+
+      for (let i = 1; i < fileIssues.length; i++) {
+        const prevLine = fileIssues[i - 1].line || 0;
+        const currLine = fileIssues[i].line || 0;
+        const groupMaxLine = Math.max(...currentGroup.map(g => g.line || 0));
+
+        if (currLine - groupMaxLine <= 3) {
+          currentGroup.push(fileIssues[i]);
+        } else {
+          lineGroups.push(currentGroup);
+          currentGroup = [fileIssues[i]];
+        }
+      }
+      lineGroups.push(currentGroup);
+
+      // 对每个行分组进行关键词去重
+      for (const group of lineGroups) {
+        if (group.length === 1) {
+          uniqueIssues.push(group[0]);
+          continue;
+        }
+
+        const kept = [group[0]];
+        for (let i = 1; i < group.length; i++) {
+          const keywordsI = extractKeywords(group[i].message);
+          let merged = false;
+
+          for (let j = 0; j < kept.length; j++) {
+            const keywordsJ = extractKeywords(kept[j].message);
+            const { jaccard, containment, intersection } = jaccardSimilarity(keywordsI, keywordsJ);
+
+            // 判定为重复：Jaccard > 0.4 或 (包含度 > 0.6 且交集关键词 >= 2)
+            const isDuplicate = keywordsI.size > 0 && keywordsJ.size > 0 &&
+              (jaccard > 0.4 || (containment > 0.6 && intersection >= 2));
+
+            if (isDuplicate) {
+              // 合并：保留第一条的描述，合并 ruleId，取更高 severity
+              const existingRuleIds = kept[j].ruleId.split(',');
+              const newRuleId = group[i].ruleId;
+              if (!existingRuleIds.includes(newRuleId)) {
+                kept[j].ruleId = kept[j].ruleId + ',' + newRuleId;
+              }
+              kept[j].severity = higherSeverity(kept[j].severity, group[i].severity);
+              console.log(`[SegmentExecutor] 合并重复问题(J=${(jaccard * 100).toFixed(0)}%,C=${(containment * 100).toFixed(0)}%): ${group[i].ruleId} -> ${kept[j].ruleId} - ${group[i].message?.substring(0, 40)}`);
+              merged = true;
+              break;
+            }
+          }
+
+          if (!merged) {
+            kept.push(group[i]);
+          }
+        }
+        uniqueIssues.push(...kept);
+      }
+    }
+
+    const dedupCount = issues.length - uniqueIssues.length;
+    if (dedupCount > 0) {
+      console.log(`[SegmentExecutor] 去重: 移除了 ${dedupCount} 个重复问题`);
+    }
+
+    console.log(`[SegmentExecutor] 解析成功: ${uniqueIssues.length} 个问题`);
+    console.log(`[SegmentExecutor] 问题中有有效行号(>0)的数量: ${uniqueIssues.filter(i => i.line > 0).length}`);
+    console.log(`[SegmentExecutor] 问题中有文件路径的数量: ${uniqueIssues.filter(i => i.filePath).length}`);
+
+    // 返回完整的八维对齐结果
+    return {
+      issues: uniqueIssues,
+      summary,
+      requirementInfo: requirementInfo,
+      requirementMatching: requirementInfo,
+      contractChecking: contractResult,
+      robustnessChecking: robustnessResult,
+      securityChecking: securityResult,
+      optimization: optimizationResult,
+      accessibility: accessibilityResult,
+      compatibility: compatibilityResult,
+      performance: performanceResult,
+      maintainability: maintainabilityResult
+    };
+  }
+
+  /**
+   * 解析文本格式响应（回退方案）
+   */
+  parseTextFormat(response) {
+    const issues = [];
+    console.log('[SegmentExecutor] parseTextFormat: 开始解析文本格式响应');
+
+    // 尝试多种模式匹配
+    const lines = response.split('\n');
+    let currentIssue = null;
+    let currentTitle = '';
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      // 模式0: 编号列表格式 "**标题**：" 或 "1. 标题："（GLM 返回的常见格式）
+      let match = trimmed.match(/^(\d+)\.\s*\*{0,2}(.+?)\*{0,2}[：:]\s*$/);
+      if (match && !trimmed.includes('问题描述') && !trimmed.includes('建议修复')) {
+        // 保存上一个问题（如果有）
+        if (currentIssue && (currentIssue.message || currentTitle)) {
+          issues.push(currentIssue);
+        }
+        currentTitle = match[2].trim();
+        currentIssue = {
+          ruleId: `QA-TEXT-${issues.length + 1}`,
+          severity: 'medium',
+          filePath: '',
+          line: 0,
+          message: currentTitle, // 使用标题作为默认消息
+          suggestion: '',
+          source: 'text-parse',
+          _title: currentTitle
+        };
+        continue;
+      }
+
+      // 模式1: [ruleId] severity: file:line
+      match = trimmed.match(/\[([^\]]+)\]\s*(high|medium|low):\s*([^:]+):(\d+)/);
+      if (match) {
+        currentIssue = {
+          ruleId: match[1],
+          severity: match[2],
+          filePath: match[3].trim(),
+          line: parseInt(match[4], 10),
+          message: '',
+          suggestion: '',
+          source: 'text-parse'
+        };
+        continue;
+      }
+
+      // 模式2: ruleId - severity - file:line
+      match = trimmed.match(/(QA-\w+)\s*[|-]\s*(high|medium|low)\s*[|-]\s*([^:]+):(\d+)/);
+      if (match) {
+        currentIssue = {
+          ruleId: match[1],
+          severity: match[2],
+          filePath: match[3].trim(),
+          line: parseInt(match[4], 10),
+          message: '',
+          suggestion: '',
+          source: 'text-parse'
+        };
+        continue;
+      }
+
+      // 匹配文件路径 "文件路径：`xxx`" 或 "- 文件路径：xxx"
+      if (trimmed.includes('文件路径') || trimmed.includes('- 文件路径')) {
+        const pathMatch = trimmed.match(/文件路径[：:]\s*`?([^`\s]+)`?/);
+        if (pathMatch && currentIssue) {
+          currentIssue.filePath = pathMatch[1].trim();
+        }
+        continue;
+      }
+
+      // 匹配行号 "行号：第 X 行" 或 "- 行号：X"
+      if (trimmed.includes('行号')) {
+        const lineMatch = trimmed.match(/行号[：:]\s*第?\s*(\d+)\s*行/);
+        if (lineMatch && currentIssue) {
+          currentIssue.line = parseInt(lineMatch[1], 10);
+        }
+        continue;
+      }
+
+      // 匹配描述
+      if (trimmed.startsWith('问题描述:') || trimmed.startsWith('问题:') || trimmed.startsWith('message:') || trimmed.startsWith('- 问题描述')) {
+        if (currentIssue) {
+          currentIssue.message = trimmed.replace(/^[-\s]*(问题描述|问题|message)[：:]/i, '').trim();
+        }
+        continue;
+      }
+
+      // 匹配建议
+      if (trimmed.startsWith('修复建议:') || trimmed.startsWith('建议:') || trimmed.startsWith('suggestion:') || trimmed.startsWith('- 建议修复')) {
+        if (currentIssue) {
+          currentIssue.suggestion = trimmed.replace(/^[-\s]*(修复建议|建议|suggestion)[：:]/i, '').trim();
+        }
+        continue;
+      }
+    }
+
+    // 如果最后一个问题没有建议，也添加进去
+    if (currentIssue) {
+      if (currentIssue.message) {
+        issues.push(currentIssue);
+      } else {
+        // 如果没有消息，使用默认消息
+        currentIssue.message = '需要审查的问题';
+        issues.push(currentIssue);
+      }
+    }
+
+    console.log('[SegmentExecutor] parseTextFormat: 解析到', issues.length, '个问题');
+
+    // 如果完全没有解析到问题，返回一个默认结果
+    if (issues.length === 0) {
+      console.warn('[SegmentExecutor] parseTextFormat: 未能解析到任何问题，返回默认结果');
+      return {
+        issues: [],
+        summary: 'AI 返回了非标准格式，无法解析问题。请检查 AI 响应内容。',
+        requirementMatching: null,
+        contractChecking: null,
+        robustnessChecking: null,
+        securityChecking: null,
+        optimization: null
+      };
+    }
+
+    return {
+      issues,
+      summary: `从文本格式解析到 ${issues.length} 个问题`,
+      requirementMatching: null,
+      contractChecking: null,
+      robustnessChecking: null,
+      securityChecking: null,
+      optimization: null
+    };
+  }
+
+  /**
+   * UI 视觉分析（独立分支，不影响代码审查）
+   * @param {Object} context - 执行上下文
+   * @returns {Promise<Object>} UI 分析结果
+   */
+  async analyzeUI(context = {}) {
+    // 检查配置是否启用 UI 分析
+    const config = this.qaReviewer?.config || this.config || {};
+    const uiAnalysisEnabled = config?.ai?.ui?.enabled !== false;  // 默认启用
+
+    // 如果 UI 分析功能被禁用，跳过
+    if (!uiAnalysisEnabled || context.disableUIAnalysis) {
+      console.log('[SegmentExecutor] UI 分析已禁用，跳过视觉检查');
+      return { issues: [], summary: 'UI 分析已禁用' };
+    }
+
+    const { uiImage, figmaUrl, requirements } = context;
+
+    // 如果没有 UI 图片或 Figma 链接，跳过 UI 分析
+    if (!uiImage && !figmaUrl) {
+      console.log('[SegmentExecutor] 没有 UI 图片或设计稿，跳过视觉分析');
+      return { issues: [], summary: '未提供 UI 图片，跳过视觉分析' };
+    }
+
+    // 检查 LLM Router 是否支持视觉分析
+    if (!this.llm || typeof this.llm.analyzeVision !== 'function') {
+      console.warn('[SegmentExecutor] LLM 不支持视觉分析，跳过 UI 检查');
+      return { issues: [], summary: 'LLM 不支持视觉分析' };
+    }
+
+    console.log('[SegmentExecutor] 开始 UI 视觉分析...');
+
+    try {
+      // 构建 UI 分析提示词
+      const prompt = this.buildUIAnalysisPrompt(requirements);
+
+      // 调用视觉分析
+      const result = await this.llm.analyzeVision({
+        imagePath: uiImage,
+        prompt: prompt,
+        options: {
+          temperature: 0.3,
+          maxTokens: 4000
+        }
+      });
+
+      if (result.success) {
+        // 解析视觉分析结果
+        const uiIssues = this.parseVisionAnalysisResult(result.content, context);
+        console.log(`[SegmentExecutor] UI 视觉分析完成，发现 ${uiIssues.length} 个问题`);
+        return {
+          issues: uiIssues,
+          summary: uiIssues.length > 0
+            ? `发现 ${uiIssues.length} 个 UI 问题`
+            : 'UI 界面符合需求'
+        };
+      } else {
+        console.warn('[SegmentExecutor] UI 视觉分析失败:', result.error);
+        return { issues: [], summary: 'UI 分析失败: ' + result.error };
+      }
+    } catch (error) {
+      console.error('[SegmentExecutor] UI 视觉分析异常:', error.message);
+      // UI 分析失败不影响代码审查结果
+      return { issues: [], summary: 'UI 分析异常: ' + error.message };
+    }
+  }
+
+  /**
+   * 构建 UI 分析提示词
+   */
+  buildUIAnalysisPrompt(requirements) {
+    let prompt = `你是一个资深的 UI/UX 审查专家。请分析这张 UI 截图，检查是否符合以下需求：
+
+【需求描述】
+${typeof requirements === 'string' ? requirements : JSON.stringify(requirements, null, 2)}
+
+【审查要点】
+请检查以下方面：
+1. 布局正确性 - 页面布局是否符合需求描述
+2. 元素完整性 - 所有必需的元素是否都存在
+3. 样式一致性 - 颜色、字体、间距是否符合设计规范
+4. 交互状态 - 不同状态（启用/禁用/加载）的显示是否正确
+5. 数据展示 - 表格/列表数据展示是否正确
+6. 响应式 - 如果是响应式设计，检查适配情况
+
+【输出格式】
+请严格按照以下 JSON 格式输出：
+
+\x60\x60\x60json
+{
+  "summary": {
+    "overallStatus": "passed|failed|partial",
+    "comment": "简要总结 UI 界面状态"
+  },
+  "issues": [
+    {
+      "ruleId": "QA-UI-001",
+      "severity": "high|medium|low",
+      "element": "具体的 UI 元素名称",
+      "message": "问题描述",
+      "suggestion": "修复建议"
+    }
+  ]
+}
+\x60\x60\x60
+
+请开始分析 UI 截图。`;
+    return prompt;
+  }
+
+  /**
+   * 解析视觉分析结果
+   */
+  parseVisionAnalysisResult(content, context) {
+    const issues = [];
+
+    try {
+      // 尝试解析 JSON 格式
+      let jsonStr = content;
+
+      // 提取 JSON 代码块
+      const jsonMatch = content.match(/```json\s*([\s\S]*?)\s*```/);
+      if (jsonMatch) {
+        jsonStr = jsonMatch[1];
+      } else {
+        // 尝试查找 { ... } 模式
+        const braceMatch = content.match(/\{[\s\S]*\}/);
+        if (braceMatch) {
+          jsonStr = braceMatch[0];
+        }
+      }
+
+      const result = JSON.parse(jsonStr);
+
+      if (result.issues && Array.isArray(result.issues)) {
+        for (const issue of result.issues) {
+          issues.push({
+            ruleId: issue.ruleId || 'QA-UI-UNKNOWN',
+            severity: issue.severity || 'medium',
+            filePath: context.uiImage || 'UI_Screenshot',
+            line: 0, // UI 问题没有具体行号
+            message: issue.message || issue.description || '',
+            suggestion: issue.suggestion || '',
+            source: 'ai-vision-analysis',
+            category: 'ui-issue',
+            element: issue.element || ''
+          });
+        }
+      }
+
+      return issues;
+    } catch (e) {
+      console.warn('[SegmentExecutor] 解析视觉分析结果失败:', e.message);
+      return [];
+    }
+  }
+
+  /**
+   * 合并摘要信息
+   */
+  mergeSummary(codeSummary, uiSummary) {
+    if (!uiSummary || uiSummary.includes('未提供 UI 图片') || uiSummary.includes('跳过视觉分析')) {
+      return codeSummary;
+    }
+    return `${codeSummary}\n\nUI 检查: ${uiSummary}`;
+  }
+
+  /**
+   * 根据 issues 数量和严重程度修正维度评分
+   * 防止 AI 返回 issues 但仍给高分的情况
+   */
+  correctScoreBasedOnIssues(llmScore, dimensionIssues) {
+    if (!dimensionIssues || dimensionIssues.length === 0) {
+      return llmScore;
+    }
+
+    const deductions = { critical: 12, high: 8, medium: 4, low: 2 };
+    let totalDeduction = 0;
+
+    for (const issue of dimensionIssues) {
+      const severity = issue.severity || 'medium';
+      totalDeduction += deductions[severity] || deductions.medium;
+    }
+
+    // 按比例扣分：最多扣到原始分的 30%，不低于 0
+    const maxDeduction = Math.floor(llmScore * 0.7);
+    totalDeduction = Math.min(totalDeduction, maxDeduction);
+
+    return Math.max(0, Math.round(llmScore - totalDeduction));
+  }
+
+  /**
+   * 合并结果（五维对齐审查架构）
+   */
+  mergeResults(qualityResults, requirementResults) {
+    // 只保留 AI 审查的问题，不包含传统规则引擎和深度分析的问题
+    const allIssues = [
+      ...(requirementResults.issues || []).map(i => ({ ...i, source: 'ai-requirement' })),
+    ];
+
+    // 统计
+    const bySeverity = { high: 0, medium: 0, low: 0 };
+    allIssues.forEach(i => {
+      const severity = i.severity || 'medium';
+      bySeverity[severity] = (bySeverity[severity] || 0) + 1;
+    });
+
+    // 按 dimension 字段分组 issues，用于评分修正
+    const issuesByDimension = {};
+    for (const issue of allIssues) {
+      const dim = issue.dimension || 'other';
+      if (!issuesByDimension[dim]) issuesByDimension[dim] = [];
+      issuesByDimension[dim].push(issue);
+    }
+
+    // 计算总体评分（基于各维度评分 + issues 修正）
+    // 修复: 使用 ?? 替代 ||，避免 score=0 被当成 falsy 回退为 100
+    const rawDimensionScores = {
+      requirementMatching: requirementResults.requirementMatching?.score ?? 100,
+      contractChecking: requirementResults.contractChecking?.score ?? 100,
+      robustnessChecking: requirementResults.robustnessChecking?.score ?? 100,
+      securityChecking: requirementResults.securityChecking?.score ?? 100,
+      accessibility: requirementResults.accessibility?.score ?? 100,
+      compatibility: requirementResults.compatibility?.score ?? 100,
+      performance: requirementResults.performance?.score ?? 100,
+      maintainability: requirementResults.maintainability?.score ?? 100
+    };
+
+    // 基于 issues 修正各维度评分
+    const dimensionScores = {};
+    const dimensionNames = ['requirementMatching', 'contractChecking', 'robustnessChecking', 'securityChecking', 'accessibility', 'compatibility', 'performance', 'maintainability'];
+    for (const dim of dimensionNames) {
+      const rawScore = rawDimensionScores[dim];
+      const dimIssues = issuesByDimension[dim] || [];
+      const correctedScore = this.correctScoreBasedOnIssues(rawScore, dimIssues);
+      dimensionScores[dim] = correctedScore;
+      if (correctedScore !== rawScore) {
+        console.log(`[SegmentExecutor] 评分修正 ${dim}: AI=${rawScore} → 修正=${correctedScore} (${dimIssues.length} 个问题)`);
+      }
+    }
+
+    // 计算平均分
+    const validScores = Object.values(dimensionScores).filter(s => s !== null && s !== undefined);
+    const overallScore = validScores.length > 0
+      ? Math.round(validScores.reduce((a, b) => a + b, 0) / validScores.length)
+      : 100;
+
+    return {
+      totalIssues: allIssues.length,
+      issues: allIssues,
+      bySeverity,
+      summary: requirementResults.summary || '',
+      // 八维对齐结果
+      requirementMatching: requirementResults.requirementMatching || null,
+      contractChecking: requirementResults.contractChecking || null,
+      robustnessChecking: requirementResults.robustnessChecking || null,
+      securityChecking: requirementResults.securityChecking || null,
+      accessibility: requirementResults.accessibility || null,
+      compatibility: requirementResults.compatibility || null,
+      performance: requirementResults.performance || null,
+      maintainability: requirementResults.maintainability || null,
+      // 评分信息
+      dimensionScores,
+      overallScore
+    };
+  }
+
+  /**
+   * 批量执行分段
+   * @param {Array<Segment>} segments - 分段列表
+   * @param {Object} options - 选项
+   * @returns {Array} 执行结果列表
+   */
+  async executeBatch(segments, options = {}) {
+    const { parallel = 1 } = options;
+
+    if (parallel === 1) {
+      // 串行执行
+      return this.executeSerial(segments, options);
+    } else {
+      // 并行执行
+      return this.executeParallel(segments, parallel, options);
+    }
+  }
+
+  /**
+   * 串行执行
+   */
+  async executeSerial(segments, options) {
+    const results = [];
+    const context = options.context || {};
+
+    // 为每个 segment 设置索引和总数
+    segments.forEach((seg, index) => {
+      seg.index = index;
+      seg.totalSegments = segments.length;
+    });
+
+    for (let i = 0; i < segments.length; i++) {
+      const segment = segments[i];
+
+      // 检查是否被取消（每个分段执行前检查）
+      if (global.qaReviewerCancelled) {
+        console.log('[SegmentExecutor] 用户取消了审查（分段执行前检查）');
+        break;
+      }
+
+      // 如果不是第一个分段，等待一段时间避免速率限制
+      // glm-4-flash 免费版有严格的速率限制，需要在分段之间添加延迟
+      if (i > 0) {
+        const delay = 20000; // 20 秒延迟，避免累积触发 429
+        console.log(`[SegmentExecutor] 分段之间等待 ${delay}ms，避免速率限制...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+
+      const result = await this.execute(segment, context);
+      results.push(result);
+
+      // 检查是否被用户取消
+      if (result.cancelled) {
+        console.log('[SegmentExecutor] 分段被用户取消，停止后续分段');
+        break;
+      }
+
+      // 如果配置了失败时停止
+      if (options.stopOnError && !result.success) {
+        break;
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * 并行执行
+   */
+  async executeParallel(segments, maxParallel, options) {
+    const results = [];
+    const queue = [...segments];
+    const executing = [];
+    const context = options.context || {};
+
+    // 为每个 segment 设置索引和总数
+    segments.forEach((seg, index) => {
+      seg.index = index;
+      seg.totalSegments = segments.length;
+    });
+
+    while (queue.length > 0 || executing.length > 0) {
+      // 填充执行队列
+      while (executing.length < maxParallel && queue.length > 0) {
+        const segment = queue.shift();
+
+        // 检查依赖是否满足
+        const completedIds = results
+          .filter(r => r.success)
+          .map(r => r.segment.id);
+
+        if (segment.canExecute(completedIds)) {
+          const promise = this.execute(segment, context)
+            .then(result => {
+              executing.splice(executing.indexOf(promise), 1);
+              return result;
+            });
+
+          executing.push(promise);
+        } else {
+          // 依赖未满足，放回队列末尾
+          queue.push(segment);
+        }
+      }
+
+      if (executing.length === 0) {
+        break;
+      }
+
+      // 等待至少一个完成
+      const result = await Promise.race(executing);
+      results.push(result);
+
+      if (this.onProgress) {
+        this.onProgress({
+          type: 'progress',
+          completed: results.length,
+          total: segments.length,
+        });
+      }
+    }
+
+    return results;
+  }
+}
+
+module.exports = SegmentExecutor;

@@ -1,0 +1,81 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+build/
+dist/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Electron
+out/
+
+# Test coverage
+coverage/
+
+# Temporary files
+*.tmp
+.temp/
+
+# App data & cache
+data/
+.claude/
+
+# Sensitive config
+.dqi-ai-config.json
+.ai-config.json
+
+# Test files
+test-*.js
+test-*.json
+test_*.js
+test_*.json
+test-runner.js
+test-results/
+saved-test-cases-dump.json
+
+# Diagnose & debug files
+diagnose-*
+fix_backticks*
+fix-prompt.py
+simple-diagnose.*
+simple-ellipsis-check.*
+hover-test-screenshot.png
+code-graph-extractor-result.json
+
+# Backup files
+.backup/
+*.bak
+*.backup
+
+# Memory / agent cache
+.memory/
+.agent-memory/
+模式对比.txt
+
+# Build / package
+*.exe
+*.msi
+*.dmg
+*.deb
+*.rpm
+*.AppImage
+*.zip
+*.tar.gz

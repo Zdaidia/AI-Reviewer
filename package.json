@@ -1,0 +1,92 @@
+{
+  "name": "dev-quality-inspector",
+  "version": "1.0.0",
+  "description": "A desktop tool for code quality inspection and automated testing",
+  "main": "src/core/electron/main.js",
+  "homepage": ".",
+  "author": "",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "concurrently \"set BROWSER=none && react-scripts start\" \"wait-on http://localhost:3003 && electron .\"",
+    "build:react": "react-scripts build",
+    "build": "npm run build:react && electron-builder --win",
+    "pack": "npm run build:react && electron-builder --win --dir"
+  },
+  "build": {
+    "appId": "com.dev-quality-inspector.app",
+    "productName": "Dev Quality Inspector",
+    "files": [
+      "build/**/*",
+      "src/**/*",
+      "rules.yaml",
+      "rules-fix.yaml",
+      "agent-config.yaml",
+      "assets/**/*",
+      "node_modules/**/*",
+      "!node_modules/puppeteer/**",
+      "!node_modules/puppeteer-core/**",
+      "!node_modules/@puppeteer/**",
+      "!node_modules/monaco-editor/min/**",
+      "!node_modules/@monaco-editor/**",
+      "!node_modules/canvas/**"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "asar": true,
+    "asarUnpack": [
+      "src/core/scanner/scan-worker.js",
+      "src/core/scanner/parallel-scanner.js",
+      "src/core/scanner/index.js",
+      "rules.yaml",
+      "rules-fix.yaml",
+      "agent-config.yaml"
+    ],
+    "npmRebuild": false,
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Dev Quality Inspector"
+    }
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.90.0",
+    "@babel/parser": "^7.23.0",
+    "@monaco-editor/react": "^4.6.0",
+    "@vue/compiler-dom": "^3.3.0",
+    "canvas": "^2.11.2",
+    "glob": "^13.0.6",
+    "js-yaml": "^4.1.0",
+    "jsonwebtoken": "^9.0.3",
+    "monaco-editor": "^0.45.0",
+    "node-fetch": "^3.3.2",
+    "open": "^8.4.2",
+    "openai": "^4.20.0",
+    "playwright": "^1.40.0",
+    "puppeteer": "^24.40.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tailwindcss": "^3.4.0",
+    "tree-kill": "^1.2.2",
+    "xlsx": "^0.18.5"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}
