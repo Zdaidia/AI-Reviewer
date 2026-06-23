@@ -23,6 +23,29 @@ const { DATA_DIR } = require('../config/data-dir');
 const path = require('path');
 const fs = require('fs');
 
+// 加载 .env 文件中的环境变量（如果尚未设置）
+function loadEnvFile() {
+  const envPaths = [
+    path.join(process.cwd(), '.env'),
+    path.join(__dirname, '../../../.env'),
+  ];
+  for (const envPath of envPaths) {
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf-8');
+      for (const line of content.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const match = trimmed.match(/^([^=]+)=(.*)$/);
+        if (match && !process.env[match[1].trim()]) {
+          process.env[match[1].trim()] = match[2].trim();
+        }
+      }
+      break;
+    }
+  }
+}
+loadEnvFile();
+
 class ReqAnalyzerConfig {
   constructor(projectPath) {
     this.projectPath = projectPath;
@@ -146,8 +169,8 @@ class ReqAnalyzerConfig {
   getDefaultConfig() {
     return {
       google: {
-        clientId: 'REPLACE_GOOGLE_CLIENT_ID',
-        clientSecret: 'REPLACE_GOOGLE_CLIENT_SECRET',
+        clientId: process.env.GOOGLE_CLIENT_ID || '',
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
         redirectUri: 'dqi://auth/callback',
       },
       sheets: {
@@ -168,7 +191,7 @@ class ReqAnalyzerConfig {
         },
       },
       figma: {
-        accessToken: 'REPLACE_FIGMA_ACCESS_TOKEN',
+        accessToken: process.env.FIGMA_ACCESS_TOKEN || '',
         defaultUrl: 'https://www.figma.com/design/iE6V1a7Bzfl2zHI2LuKIQY/%E5%8F%B0%E5%8D%97%E5%81%8C%E8%BB%8A%E7%87%9F%E9%81%8B%E7%AE%A1%E7%90%86%E7%B3%BB%E7%B5%B1?node-id=28959-188&p=f&t=o2OTzZ0makHYkZWf-0',
       },
       output: {
