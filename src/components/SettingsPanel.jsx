@@ -705,9 +705,9 @@ function AIConfigTab({ config, onChange, onSave, onReset, saving, electronAPI })
         <h3 className="text-white font-medium mb-3">AI 提供商</h3>
         <div className="grid grid-cols-3 gap-2">
           {[
-            { value: 'claude-code', label: 'Router Team', icon: '🤖' },
+            { value: 'zhipu', label: '智谱 AI (推荐)', icon: '🇨🇳' },
             { value: 'deepseek', label: 'DeepSeek', icon: '🐋' },
-            { value: 'zhipu', label: '智谱 AI', icon: '🇨🇳' },
+            { value: 'claude-code', label: 'Router Team', icon: '🤖' },
             { value: 'openai', label: 'OpenAI', icon: '🌐' },
             { value: 'anthropic', label: 'Anthropic', icon: '🧠' },
             { value: 'custom', label: '自定义', icon: '🔧' },
@@ -784,7 +784,7 @@ function AIConfigTab({ config, onChange, onSave, onReset, saving, electronAPI })
             type="text"
             value={localConfig.model || ''}
             onChange={(e) => updateField('model', e.target.value)}
-            placeholder="glm-5, glm-4-flash, deepseek-v4-pro, gpt-4, etc."
+            placeholder="glm-5.1, glm-5, deepseek-v4-pro, gpt-4, etc."
             className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
           />
           {/* 模型建议 */}

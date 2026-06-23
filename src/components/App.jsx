@@ -37,6 +37,7 @@ import ScanRangeSelector from './ScanRangeSelector';
 import SettingsPanel from './SettingsPanel';
 import QAReviewerModal from './QAReviewerModal';
 import CodeReviewRangeSelector from './CodeReviewRangeSelector';
+import ReqAnalyzerModal from './ReqAnalyzerModal';
 
 // Access Electron API from preload script
 const electronAPI = window.electronAPI;
@@ -129,6 +130,7 @@ function App() {
 
   // State for QA Reviewer
   const [qaReviewModalOpen, setQaReviewModalOpen] = useState(false);
+  const [reqAnalyzerModalOpen, setReqAnalyzerModalOpen] = useState(false);
   const [qaReviewProgress, setQaReviewProgress] = useState(null);
 
   // Toolbar active button state
@@ -551,6 +553,9 @@ function App() {
         break;
       case 'settings':
         setSettingsOpen(true);
+        break;
+      case 'reqAnalyzer':
+        setReqAnalyzerModalOpen(true);
         break;
       case 'aiTest':
         await handleAITest();
@@ -2471,6 +2476,12 @@ function App() {
         isOpen={qaReviewModalOpen}
         onClose={() => setQaReviewModalOpen(false)}
         electronAPI={electronAPI}
+        projectPath={currentProjectPath}
+      />
+
+      <ReqAnalyzerModal
+        isOpen={reqAnalyzerModalOpen}
+        onClose={() => setReqAnalyzerModalOpen(false)}
         projectPath={currentProjectPath}
       />
     </div>

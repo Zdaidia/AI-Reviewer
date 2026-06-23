@@ -1,0 +1,912 @@
+.req-analyzer-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.req-analyzer-modal {
+  width: 90vw;
+  max-width: 1200px;
+  height: 85vh;
+  background: #1e1e2e;
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  color: #cdd6f4;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+}
+
+.req-analyzer-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  border-bottom: 1px solid #45475a;
+}
+
+.req-analyzer-modal-header h2 {
+  margin: 0;
+  font-size: 18px;
+  color: #cdd6f4;
+}
+
+.req-analyzer-close-btn {
+  background: none;
+  border: none;
+  color: #6c7086;
+  cursor: pointer;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.15s;
+}
+
+.req-analyzer-close-btn:hover {
+  color: #f38ba8;
+}
+
+.req-analyzer-close-icon {
+  width: 24px;
+  height: 24px;
+}
+
+.req-analyzer-requirement-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px 12px;
+}
+
+/* Combobox */
+.req-analyzer-combobox {
+  position: relative;
+  flex: 1;
+}
+
+.req-analyzer-combobox .req-analyzer-input-wide {
+  width: 100%;
+}
+
+.req-analyzer-dropdown {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: #313244;
+  border: 1px solid #585b70;
+  border-radius: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 100;
+  margin-top: 2px;
+}
+
+.req-analyzer-dropdown-item {
+  padding: 8px 12px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  color: #cdd6f4;
+  font-size: 13px;
+}
+
+.req-analyzer-dropdown-item:hover {
+  background: #45475a;
+}
+
+.req-analyzer-dropdown-item-date {
+  color: #7f849c;
+  font-size: 11px;
+}
+
+.req-analyzer-btn-danger-sm {
+  color: #f38ba8;
+  border-color: #f38ba8;
+  font-size: 11px;
+}
+
+.req-analyzer-btn-danger-sm:hover {
+  background: #f38ba8;
+  color: #1e1e2e;
+}
+
+.req-analyzer-tab-bar {
+  display: flex;
+  padding: 4px 16px;
+  border-bottom: 1px solid #45475a;
+  gap: 10px;
+  overflow-x: auto;
+}
+
+.req-analyzer-tab {
+  padding: 5px 8px;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  color: #bac2de;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.req-analyzer-tab:hover {
+  background: #45475a;
+  color: #cdd6f4;
+}
+
+.req-analyzer-tab.active {
+  background: #585b70;
+  color: #cdd6f4;
+  border-color: #89b4fa;
+}
+
+.req-analyzer-tab.done {
+  border-color: #a6e3a1;
+}
+
+.req-analyzer-tab.done .req-analyzer-tab-icon {
+  color: #a6e3a1;
+}
+
+.req-analyzer-tab-done {
+  color: #a6e3a1;
+  margin-left: 2px;
+  font-size: 10px;
+}
+
+/* 步骤进度条 */
+.req-analyzer-progress-track {
+  display: flex;
+  padding: 8px 16px 4px;
+  gap: 0;
+}
+
+.req-analyzer-progress-step {
+  flex: 1;
+  height: 3px;
+  background: #313244;
+  border-radius: 1px;
+  transition: background 0.3s;
+}
+
+.req-analyzer-progress-step.completed {
+  background: #a6e3a1;
+}
+
+.req-analyzer-progress-step.current {
+  background: #89b4fa;
+}
+
+.req-analyzer-progress-track-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px 4px;
+}
+
+.req-analyzer-progress-track-wrapper .req-analyzer-progress-track {
+  flex: 1;
+  padding: 0;
+}
+
+.req-analyzer-auto-on {
+  color: #a6e3a1;
+  border-color: #a6e3a1;
+}
+
+.req-analyzer-auto-off {
+  color: #7f849c;
+  border-color: #585b70;
+}
+
+.req-analyzer-tab-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px;
+}
+
+/* Auth Tab */
+.req-analyzer-auth-tab,
+.req-analyzer-figma-tab,
+.req-analyzer-analyze-tab,
+.req-analyzer-refine-tab,
+.req-analyzer-execute-tab,
+.req-analyzer-settings-tab,
+.req-analyzer-sources-tab {
+  padding: 10px 0;
+}
+
+.req-analyzer-desc {
+  color: #a6adc8;
+  font-size: 14px;
+  margin-bottom: 16px;
+}
+
+.req-analyzer-permissions {
+  color: #89b4fa;
+  font-size: 12px;
+  margin-bottom: 16px;
+}
+
+.req-analyzer-auth-success {
+  padding: 16px;
+  background: #1e3a2f;
+  border-radius: 8px;
+  border: 1px solid #a6e3a1;
+}
+
+.req-analyzer-auth-success p {
+  margin: 0 0 10px 0;
+}
+
+/* Buttons */
+.req-analyzer-btn-primary {
+  padding: 8px 14px;
+  background: #89b4fa;
+  color: #1e1e2e;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 500;
+  height: 38px;
+  line-height: 1;
+}
+
+.req-analyzer-btn-primary:hover {
+  background: #b4befe;
+}
+
+.req-analyzer-btn-primary:disabled {
+  background: #585b70;
+  color: #6c7086;
+  cursor: not-allowed;
+}
+
+.req-analyzer-btn-secondary {
+  padding: 8px 14px;
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #585b70;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  height: 38px;
+  line-height: 1;
+}
+
+.req-analyzer-btn-secondary:hover {
+  background: #45475a;
+}
+
+.req-analyzer-btn-danger {
+  padding: 8px 16px;
+  background: #f38ba8;
+  color: #1e1e2e;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.req-analyzer-btn-sm {
+  padding: 3px 6px;
+  background: #313244;
+  border: 1px solid #585b70;
+  border-radius: 4px;
+  color: #cdd6f4;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* Inputs */
+.req-analyzer-input {
+  padding: 8px 12px;
+  background: #313244;
+  border: 1px solid #585b70;
+  border-radius: 6px;
+  color: #cdd6f4;
+  font-size: 14px;
+}
+
+.req-analyzer-input-wide {
+  padding: 8px 12px;
+  background: #313244;
+  border: 1px solid #585b70;
+  border-radius: 6px;
+  color: #cdd6f4;
+  font-size: 14px;
+  width: 100%;
+}
+
+.req-analyzer-input:focus {
+  border-color: #89b4fa;
+  outline: none;
+}
+
+.req-analyzer-input-wide:focus {
+  border-color: #89b4fa;
+  outline: none;
+}
+
+.req-analyzer-row-select:focus {
+  border-color: #89b4fa;
+  outline: none;
+}
+
+.req-analyzer-form-group {
+  margin-bottom: 12px;
+}
+
+.req-analyzer-form-group label {
+  display: block;
+  color: #a6adc8;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.req-analyzer-hint {
+  color: #7f849c;
+  font-size: 12px;
+  margin: 4px 0 0 0;
+  line-height: 1.5;
+}
+
+.req-analyzer-url-input .req-analyzer-btn-primary,
+.req-analyzer-url-input .req-analyzer-btn-secondary {
+  white-space: nowrap;
+  padding: 8px 14px;
+  flex-shrink: 0;
+  font-size: 14px;
+  height: 38px;
+  line-height: 1;
+}
+
+.req-analyzer-url-input {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.req-analyzer-token-input {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.req-analyzer-token-input .req-analyzer-input-wide {
+  flex: 1;
+}
+
+/* Sections */
+.req-analyzer-section {
+  padding: 16px;
+  margin-bottom: 16px;
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 8px;
+}
+
+.req-analyzer-section h4 {
+  margin: 0 0 8px 0;
+  color: #89b4fa;
+  font-size: 14px;
+}
+
+/* Data Preview */
+.req-analyzer-data-preview {
+  margin-top: 12px;
+}
+
+.req-analyzer-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.req-analyzer-preview-header p {
+  margin: 0;
+}
+
+.req-analyzer-row-select {
+  padding: 4px 8px;
+  background: #313244;
+  border: 1px solid #585b70;
+  border-radius: 4px;
+  color: #cdd6f4;
+  font-size: 12px;
+}
+
+.req-analyzer-data-summary {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 16px;
+  color: #a6adc8;
+}
+
+.req-analyzer-table-scroll {
+  max-height: 300px;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
+.req-analyzer-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.req-analyzer-preview-table th {
+  background: #313244;
+  color: #89b4fa;
+  padding: 6px 8px;
+  border: 1px solid #45475a;
+  text-align: left;
+}
+
+.req-analyzer-preview-table td {
+  padding: 6px 8px;
+  border: 1px solid #313244;
+  color: #cdd6f4;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Figma Results */
+.req-analyzer-figma-results {
+  margin-top: 16px;
+  padding: 12px;
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 8px;
+}
+
+.req-analyzer-figma-categories {
+  display: flex;
+  gap: 16px;
+}
+
+/* File List */
+.req-analyzer-file-list {
+  margin-top: 8px;
+}
+
+.req-analyzer-file-item {
+  padding: 8px 12px;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+}
+
+.req-analyzer-file-item:hover {
+  background: #45475a;
+}
+
+.req-analyzer-file-type {
+  color: #89b4fa;
+  font-size: 12px;
+}
+
+/* Refined Preview */
+.req-analyzer-refined-preview,
+.req-analyzer-save-section {
+  margin-top: 16px;
+}
+
+.req-analyzer-markdown-preview {
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 8px;
+  padding: 12px;
+  overflow-y: auto;
+  max-height: 400px;
+}
+
+.req-analyzer-markdown-preview pre {
+  color: #cdd6f4;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.req-analyzer-save-path-preview {
+  color: #a6adc8;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+/* Messages */
+.req-analyzer-success-msg {
+  color: #a6e3a1;
+  font-size: 14px;
+}
+
+.req-analyzer-warning-msg {
+  color: #f9e2af;
+  font-size: 14px;
+}
+
+.req-analyzer-check-result {
+  margin-top: 12px;
+  padding: 12px;
+  background: #181825;
+  border-radius: 8px;
+}
+
+/* Spinner 加载动画 */
+.req-analyzer-spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid #585b70;
+  border-top-color: #89b4fa;
+  border-radius: 50%;
+  animation: req-analyzer-spin 0.8s linear infinite;
+}
+
+.req-analyzer-spinner-lg {
+  width: 32px;
+  height: 32px;
+  border-width: 3px;
+}
+
+@keyframes req-analyzer-spin {
+  to { transform: rotate(360deg); }
+}
+
+.req-analyzer-spinner-overlay {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  padding: 40px 20px;
+  background: rgba(30, 30, 46, 0.6);
+  border-radius: 8px;
+}
+
+.req-analyzer-spinner-text {
+  color: #a6adc8;
+  font-size: 14px;
+}
+
+/* 空状态引导 */
+.req-analyzer-empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  padding: 40px 20px;
+  color: #7f849c;
+  text-align: center;
+}
+
+.req-analyzer-empty-state-icon {
+  font-size: 32px;
+  opacity: 0.5;
+}
+
+.req-analyzer-empty-state-text {
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* Drive 浏览模式 */
+.req-analyzer-drive-mode {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.req-analyzer-drive-browser {
+  margin-top: 8px;
+}
+
+.req-analyzer-folder-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.req-analyzer-folder-item {
+  padding: 4px 10px;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  color: #cdd6f4;
+  transition: all 0.2s;
+}
+
+.req-analyzer-folder-item:hover {
+  background: #45475a;
+}
+
+.req-analyzer-folder-item.active {
+  border-color: #89b4fa;
+  background: #45475a;
+  color: #89b4fa;
+}
+
+/* 流式输出 */
+.req-analyzer-stream-output {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: #181825;
+  border: 1px solid #313244;
+  border-radius: 8px;
+}
+
+.req-analyzer-stream-output h4 {
+  margin: 0 0 8px 0;
+  color: #f9e2af;
+  font-size: 13px;
+}
+
+.req-analyzer-stream-text {
+  color: #cdd6f4;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 200px;
+  overflow-y: auto;
+  line-height: 1.5;
+  padding: 8px;
+  background: #11111b;
+  border-radius: 4px;
+}
+
+.req-analyzer-analyze-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Figma 页面选择器 */
+.req-analyzer-page-selector {
+  margin-top: 12px;
+  border: 1px solid #45475a;
+  border-radius: 8px;
+  background: #181825;
+  padding: 12px;
+}
+
+.req-analyzer-page-selector-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #a6adc8;
+}
+
+.req-analyzer-page-selector-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.req-analyzer-page-select-all {
+  color: #a6e3a1;
+}
+
+.req-analyzer-page-select-none {
+  color: #f38ba8;
+}
+
+.req-analyzer-page-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.req-analyzer-page-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-size: 13px;
+}
+
+.req-analyzer-page-item:hover {
+  background: #313244;
+}
+
+.req-analyzer-page-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #89b4fa;
+  cursor: pointer;
+}
+
+.req-analyzer-page-name {
+  flex: 1;
+  color: #cdd6f4;
+  font-weight: 500;
+}
+
+.req-analyzer-page-count {
+  color: #6c7086;
+  font-size: 12px;
+}
+
+/* 可清空输入框 - x 在输入框内部 */
+.req-analyzer-clearable-input {
+  position: relative;
+  width: 100%;
+}
+
+.req-analyzer-clearable-input .req-analyzer-input-wide,
+.req-analyzer-clearable-input .req-analyzer-input {
+  width: 100%;
+  padding-right: 28px;
+}
+
+.req-analyzer-clear-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 50%;
+  background: #585b70;
+  color: #cdd6f4;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.req-analyzer-clear-btn:hover {
+  background: #f38ba8;
+  color: #1e1e2e;
+}
+
+/* 语言下拉框 */
+.req-analyzer-lang-select {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid #45475a;
+  background: #313244;
+  color: #cdd6f4;
+  font-size: 13px;
+  cursor: pointer;
+  margin-left: 8px;
+  height: 32px;
+}
+.req-analyzer-lang-select:focus {
+  outline: 2px solid #89b4fa;
+  outline-offset: -1px;
+}
+
+/* 页面选择器 */
+.req-analyzer-page-selector {
+  margin-top: 8px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+}
+.req-analyzer-page-selector h4 {
+  margin: 0 0 6px 0;
+  font-size: 13px;
+  color: #cdd6f4;
+}
+.req-analyzer-page-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: #bac2de;
+  cursor: pointer;
+}
+.req-analyzer-page-item input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  accent-color: #89b4fa;
+}
+
+/* 已保存文件列表 */
+.req-analyzer-saved-files {
+  margin-top: 12px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 6px;
+}
+.req-analyzer-saved-files h4 {
+  margin: 0 0 8px 0;
+  font-size: 13px;
+  color: #cdd6f4;
+}
+.req-analyzer-saved-file-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.req-analyzer-saved-file-item:last-child {
+  border-bottom: none;
+}
+.req-analyzer-saved-file-name {
+  font-size: 13px;
+  color: #a6adc8;
+  flex: 1;
+}
+.req-analyzer-saved-file-info {
+  font-size: 11px;
+  color: #6c7086;
+}
+.req-analyzer-btn-danger {
+  padding: 3px 10px;
+  font-size: 12px;
+  background: #f38ba8;
+  color: #1e1e2e;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.req-analyzer-btn-danger:hover {
+  background: #eba0ac;
+}
+
+/* 章节选择器 */
+.req-analyzer-section-selector {
+  margin: 12px 0;
+  padding: 10px;
+  background: #313244;
+  border-radius: 8px;
+}
+.req-analyzer-section-selector h4 {
+  margin: 0 0 8px 0;
+  color: #cdd6f4;
+  font-size: 14px;
+}
+.req-analyzer-section-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid #45475a;
+}
+.req-analyzer-section-item:last-child {
+  border-bottom: none;
+}
+.req-analyzer-section-item input[type="checkbox"] {
+  margin-top: 2px;
+  accent-color: #a6e3a1;
+}
+.req-analyzer-section-title {
+  font-size: 13px;
+  color: #a6e3a1;
+  font-weight: 600;
+  min-width: 120px;
+}
+.req-analyzer-section-preview {
+  font-size: 11px;
+  color: #6c7086;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

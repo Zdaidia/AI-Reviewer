@@ -255,6 +255,49 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.removeAllListeners('qa-reviewer:progress');
   },
 
+  // Requirement Analyzer
+  reqAnalyzerGoogleAuthStart: () => ipcRenderer.invoke('req-analyzer:google-auth-start'),
+  reqAnalyzerGoogleAuthStatus: () => ipcRenderer.invoke('req-analyzer:google-auth-status'),
+  reqAnalyzerGoogleAuthRevoke: () => ipcRenderer.invoke('req-analyzer:google-auth-revoke'),
+  reqAnalyzerReadRequirementSheets: (sheetsUrl, columnMapping) => ipcRenderer.invoke('req-analyzer:read-requirement-sheets', sheetsUrl, columnMapping),
+  reqAnalyzerReadConfirmedIssues: (sheetsUrl, columnMapping) => ipcRenderer.invoke('req-analyzer:read-confirmed-issues', sheetsUrl, columnMapping),
+  reqAnalyzerWriteQuestionList: (sheetsUrl, questionList, moduleName, language) => ipcRenderer.invoke('req-analyzer:write-question-list', sheetsUrl, questionList, moduleName, language),
+  reqAnalyzerReadQuestionReplies: (sheetsUrl, moduleName) => ipcRenderer.invoke('req-analyzer:read-question-replies', sheetsUrl, moduleName),
+  reqAnalyzerReadDriveFile: (fileId) => ipcRenderer.invoke('req-analyzer:read-drive-file', fileId),
+  reqAnalyzerSearchDriveFiles: (query, options) => ipcRenderer.invoke('req-analyzer:search-drive-files', query, options),
+  reqAnalyzerListDriveRootFolders: () => ipcRenderer.invoke('req-analyzer:list-drive-root-folders'),
+  reqAnalyzerListDriveFolderFiles: (folderId, options) => ipcRenderer.invoke('req-analyzer:list-drive-folder-files', folderId, options),
+  reqAnalyzerBrowseSharedDriveRoot: (driveId) => ipcRenderer.invoke('req-analyzer:browse-shared-drive-root', driveId),
+  reqAnalyzerReadLocalFile: (filePath) => ipcRenderer.invoke('req-analyzer:read-local-file', filePath),
+  reqAnalyzerExtractFigmaRequirements: (figmaUrl, nodeId, layerIds) => ipcRenderer.invoke('req-analyzer:extract-figma-requirements', figmaUrl, nodeId, layerIds),
+  reqAnalyzerListFigmaPages: (figmaUrl) => ipcRenderer.invoke('req-analyzer:list-figma-pages', figmaUrl),
+  reqAnalyzerSetFigmaToken: (token) => ipcRenderer.invoke('req-analyzer:set-figma-token', token),
+  reqAnalyzerAnalyzeRequirements: (allData) => ipcRenderer.invoke('req-analyzer:analyze-requirements', allData),
+  reqAnalyzerAnalyzeStream: (allData) => ipcRenderer.invoke('req-analyzer:analyze-stream', allData),
+  reqAnalyzerExecuteFullPipeline: (allData, confirmedIssues) => ipcRenderer.invoke('req-analyzer:execute-full-pipeline', allData, confirmedIssues),
+  onReqAnalyzerStream: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('req-analyzer:stream', handler);
+    return () => ipcRenderer.removeListener('req-analyzer:stream', handler);
+  },
+  reqAnalyzerRefineRequirements: (questionList, replies, allData, confirmedIssues, language) => ipcRenderer.invoke('req-analyzer:refine-requirements', questionList, replies, allData, confirmedIssues, language),
+  reqAnalyzerSaveRequirementFile: (content, moduleName, filename) => ipcRenderer.invoke('req-analyzer:save-requirement-file', content, moduleName, filename),
+  reqAnalyzerListSavedFiles: () => ipcRenderer.invoke('req-analyzer:list-saved-files'),
+  reqAnalyzerDeleteSavedFile: (moduleName) => ipcRenderer.invoke('req-analyzer:delete-saved-file', moduleName),
+  reqAnalyzerGetConfig: () => ipcRenderer.invoke('req-analyzer:get-config'),
+  reqAnalyzerUpdateConfig: (updates) => ipcRenderer.invoke('req-analyzer:update-config', updates),
+  reqAnalyzerSetCurrentRequirement: (name) => ipcRenderer.invoke('req-analyzer:set-current-requirement', name),
+  reqAnalyzerListRequirements: () => ipcRenderer.invoke('req-analyzer:list-requirements'),
+  reqAnalyzerLoadCachedData: (requirementName) => ipcRenderer.invoke('req-analyzer:load-cached-data', requirementName),
+  reqAnalyzerDeleteRequirement: (requirementName) => ipcRenderer.invoke('req-analyzer:delete-requirement', requirementName),
+  reqAnalyzerGetSavePathPreview: (moduleName) => ipcRenderer.invoke('req-analyzer:get-save-path-preview', moduleName),
+  reqAnalyzerInferRequirementName: (sheetsData) => ipcRenderer.invoke('req-analyzer:infer-requirement-name', sheetsData),
+  onReqAnalyzerProgress: (callback) => {
+    const handler = (event, data) => callback(data);
+    ipcRenderer.on('req-analyzer:progress', handler);
+    return () => ipcRenderer.removeListener('req-analyzer:progress', handler);
+  },
+
   // LLM Configuration
   checkClaudeConfig: () => ipcRenderer.invoke('check-claude-config'),
   getLLMConfig: () => ipcRenderer.invoke('get-llm-config'),

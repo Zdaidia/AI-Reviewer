@@ -89,6 +89,10 @@ try { TestCaseStorage = require('../testing/test-case-storage'); debugLog('✓ T
 try { BDDTestParser = require('../testing/bdd-test-parser'); debugLog('✓ BDDTestParser'); } catch(e) { debugLog(`❌ BDDTestParser: ${e.message}`); }
 try { AIContextGenerator = require('../scanner/ai-context-generator'); debugLog('✓ AIContextGenerator'); } catch(e) { debugLog(`❌ AIContextGenerator: ${e.message}`); }
 
+// Requirement Analyzer 模块
+let ReqAnalyzer;
+try { ReqAnalyzer = require('../req-analyzer'); debugLog('✓ ReqAnalyzer'); } catch(e) { debugLog(`❌ ReqAnalyzer: ${e.message}`); }
+
 // Import Agent modules
 const { createToolRegistry } = require('../agent/tools');
 const { LLMRouter } = require('../agent/llm');
@@ -116,6 +120,9 @@ let agentLLM;
 let agentMemory;
 let contextBuilder;
 let taskRecordManager;
+
+// Requirement Analyzer
+let reqAnalyzer;
 
 /**
  * Create main application window
@@ -200,7 +207,7 @@ function initializeModules() {
 
   // Initialize AI fixer - 先加载用户保存的配置
   aiFixer = new AIFixer();
-  let userAIModel = 'deepseek-v4-pro'; // 默认模型
+  let userAIModel = 'glm-5.1'; // 默认模型：智谱AI
   try {
     // 读取用户保存的 AI 配置
     const savedConfig = aiFixer.config.getConfig();
@@ -244,6 +251,19 @@ function initializeModules() {
 
   // Initialize Agent components
   initializeAgent();
+
+  // Initialize Requirement Analyzer（延迟初始化，需要 global.llmRouter）
+  if (ReqAnalyzer) {
+    try {
+      reqAnalyzer = new ReqAnalyzer.ReqAnalyzer({
+        llm: global.llmRouter || null,
+        figmaIntegration: testingManager?.figmaIntegration || null,
+      });
+      console.log('✓ Requirement Analyzer initialized');
+    } catch (e) {
+      console.warn(`❌ Requirement Analyzer initialization: ${e.message}`);
+    }
+  }
 }
 
 /**
@@ -2399,48 +2419,8 @@ ipcMain.handle('ai-fix-config', async (event) => {
     const config = aiFixer.getConfig();
     const validation = aiFixer.validateConfig();
 
-    // 应用用户保存的配置到全局 LLM Router（模型 + API Key + Endpoint）
-    if (global.llmRouter) {
-      const routerUpdates = {};
-      const userModel = config.model || 'glm-5.1';
-      if (userModel) {
-        routerUpdates.defaultModel = userModel;
-        routerUpdates.highQualityModel = userModel;
-        routerUpdates.fastModel = userModel;
-      }
-
-      // 根据模型的 provider 找到对应配置（避免用错误的 endpoint）
-      let activeApiKey = config.apiKey;
-      let activeApiEndpoint = config.apiEndpoint;
-      try {
-        const { MODEL_SPECS } = require('../agent/llm/router');
-        const modelSpec = MODEL_SPECS[userModel];
-        if (modelSpec && modelSpec.provider) {
-          const providerCfg = (config.providerConfigs || {})[modelSpec.provider];
-          if (providerCfg && providerCfg.apiKey && providerCfg.apiEndpoint) {
-            activeApiKey = providerCfg.apiKey;
-            activeApiEndpoint = providerCfg.apiEndpoint;
-            debugLog(`[ai-fix-config] 模型 ${userModel} → provider ${modelSpec.provider} → endpoint ${providerCfg.apiEndpoint}`);
-          }
-        }
-      } catch (e) { /* 忽略 */ }
-
-      if (activeApiKey) {
-        routerUpdates.projectApiKey = activeApiKey;
-        process.env.ANTHROPIC_AUTH_TOKEN = activeApiKey;
-      }
-      if (activeApiEndpoint) {
-        routerUpdates.projectApiEndpoint = activeApiEndpoint;
-        process.env.ANTHROPIC_BASE_URL = activeApiEndpoint;
-      }
-      if (Object.keys(routerUpdates).length > 0) {
-        global.llmRouter.updateConfig(routerUpdates);
-        console.log('[Main] 应用用户保存的配置到 LLM Router:', {
-          model: config.model,
-          endpoint: config.apiEndpoint,
-        });
-      }
-    }
+    // 只读取配置给前端展示，不修改全局 LLM Router
+    // 路由器在启动时已正确初始化，修改由 ai-fix-update-config 和 save-llm-config 负责
 
     return { success: true, config, validation };
   } catch (error) {
@@ -3375,6 +3355,14 @@ app.whenReady().then(() => {
   // 初始化 QA Reviewer 取消标志
   global.qaReviewerCancelled = false;
 
+  // 注册 dqi:// 自定义协议（用于 Google OAuth2 回调）
+  try {
+    app.setAsDefaultProtocolClient('dqi');
+    console.log('[Main] dqi:// 自定义协议已注册');
+  } catch (e) {
+    console.warn(`[Main] dqi:// 协议注册失败: ${e.message}`);
+  }
+
   // Register protocol handler for serving local images
   protocol.handle('local-resource', (request) => {
     // 调试：打印完整的原始 URL
@@ -3465,6 +3453,18 @@ app.whenReady().then(() => {
   debugLog('开始 createWindow...');
   createWindow();
   debugLog('createWindow 完成');
+});
+
+// 处理 dqi:// 协议回调（Windows second-instance 事件）
+app.on('second-instance', (event, commandLine) => {
+  const url = commandLine.find(arg => arg.startsWith('dqi://'));
+  if (url && reqAnalyzer && reqAnalyzer.googleAuth) {
+    reqAnalyzer.googleAuth.handleAuthCallback(url);
+  }
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
 });
 
 app.on('window-all-closed', () => {
@@ -3633,6 +3633,360 @@ ipcMain.handle('get-figma-node', async (event, fileKey, nodeId) => {
     return await testingManager.getFigmaFileNode(fileKey, nodeId);
   } catch (error) {
     return { success: false, error: error.message };
+  }
+});
+
+// ============================================
+// Requirement Analyzer IPC Handlers
+// ============================================
+
+// 辅助函数：确保 reqAnalyzer 已初始化
+async function ensureReqAnalyzerReady() {
+  if (!reqAnalyzer) throw new Error('Requirement Analyzer 未初始化');
+  // 允许无项目路径时初始化（Google登录/Sheets读取等不依赖项目路径）
+  const projectPath = global.currentProjectPath || 'default-project';
+  await reqAnalyzer.ensureInitialized(projectPath);
+}
+
+// Google OAuth2 认证
+ipcMain.handle('req-analyzer:google-auth-start', async (event) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.startGoogleAuth(mainWindow);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('req-analyzer:google-auth-status', async (event) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return reqAnalyzer.getGoogleAuthStatus();
+  } catch (error) {
+    return { isAuthenticated: false, error: error.message };
+  }
+});
+
+ipcMain.handle('req-analyzer:google-auth-revoke', async (event) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.revokeGoogleAuth();
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 读取 Google Sheets 需求数据
+ipcMain.handle('req-analyzer:read-requirement-sheets', async (event, sheetsUrl, columnMapping) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.readRequirementSheets(sheetsUrl, columnMapping);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 读取已确认的共通问题
+ipcMain.handle('req-analyzer:read-confirmed-issues', async (event, sheetsUrl, columnMapping) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.readConfirmedIssues(sheetsUrl, columnMapping);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 写入问题清单到 Sheets
+ipcMain.handle('req-analyzer:write-question-list', async (event, sheetsUrl, questionList, moduleName, language) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.writeQuestionList(sheetsUrl, questionList, moduleName, language || 'zh-TW');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 读取问题回复
+ipcMain.handle('req-analyzer:read-question-replies', async (event, sheetsUrl, moduleName) => {
+  try {
+    await ensureReqAnalyzerReady();
+    const sheetName = moduleName ? `${moduleName}-规格问题` : '规格问题';
+    return await reqAnalyzer.readQuestionReplies(sheetsUrl, 1, sheetName);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 从 Drive 下载文件
+ipcMain.handle('req-analyzer:read-drive-file', async (event, fileId) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.readDriveFile(fileId);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 搜索 Drive 文件
+ipcMain.handle('req-analyzer:search-drive-files', async (event, query, options) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.searchDriveFiles(query, options);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('req-analyzer:list-drive-root-folders', async (event) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.listDriveRootFolders();
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('req-analyzer:list-drive-folder-files', async (event, folderId, options) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.listDriveFolderFiles(folderId, options);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 浏览共享 Drive 根目录
+ipcMain.handle('req-analyzer:browse-shared-drive-root', async (event, driveId) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.browseSharedDriveRoot(driveId);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 读取本地文件
+ipcMain.handle('req-analyzer:read-local-file', async (event, filePath) => {
+  try {
+    await ensureReqAnalyzerReady();
+    const result = await reqAnalyzer.readLocalFile(filePath);
+    console.log('[read-local-file] 结果: success=', result.success, 'fileType=', result.fileType, 'content长度=', result.content?.length, 'error=', result.error);
+    return result;
+  } catch (error) {
+    console.log('[read-local-file] 异常:', error.message, error.stack);
+    return { success: false, error: error.message };
+  }
+});
+
+// 从 Figma 提取需求
+ipcMain.handle('req-analyzer:extract-figma-requirements', async (event, figmaUrl, nodeId, layerIds) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.extractFigmaRequirements(figmaUrl, nodeId, layerIds);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 列出 Figma 文件中的页面（req-analyzer 用）
+ipcMain.handle('req-analyzer:list-figma-pages', async (event, figmaUrl) => {
+  try {
+    await ensureReqAnalyzerReady();
+    const result = await reqAnalyzer.listFigmaNodeChildren(figmaUrl);
+    return result;
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 设置 Figma Token（req-analyzer 用）
+ipcMain.handle('req-analyzer:set-figma-token', async (event, token) => {
+  try {
+    await ensureReqAnalyzerReady();
+    reqAnalyzer.setFigmaToken(token);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// AI 分析需求
+ipcMain.handle('req-analyzer:analyze-requirements', async (event, allData) => {
+  try {
+    await ensureReqAnalyzerReady();
+    const onProgress = (progress) => {
+      event.sender.send('req-analyzer:progress', progress);
+    };
+    const result = await reqAnalyzer.analyzeRequirements(allData, onProgress);
+    return result;
+  } catch (error) {
+    console.error('[req-analyzer:analyze-requirements] 异常:', error.message);
+    return { success: false, error: error.message };
+  }
+});
+
+// 流式分析需求（逐步推送 LLM 输出）
+ipcMain.handle('req-analyzer:analyze-stream', async (event, allData) => {
+  try {
+    await ensureReqAnalyzerReady();
+    const webContents = event.sender;
+    const onProgress = (progress) => {
+      if (!webContents.isDestroyed()) {
+        webContents.send('req-analyzer:progress', progress);
+      }
+    };
+    const result = await reqAnalyzer.analyzeRequirementsStream(allData, webContents, onProgress);
+    return result;
+  } catch (error) {
+    console.error('[req-analyzer:analyze-stream] 异常:', error.message);
+    return { success: false, error: error.message };
+  }
+});
+
+// 一键完整执行（全自动流程：分析→推断→完善→生成）
+ipcMain.handle('req-analyzer:execute-full-pipeline', async (event, allData, confirmedIssues) => {
+  try {
+    await ensureReqAnalyzerReady();
+    const onProgress = (progress) => {
+      event.sender.send('req-analyzer:progress', progress);
+    };
+    const result = await reqAnalyzer.executeFullPipeline(allData, confirmedIssues || [], onProgress);
+    return result;
+  } catch (error) {
+    console.error('[req-analyzer:execute-full-pipeline] 异常:', error.message);
+    return { success: false, error: error.message };
+  }
+});
+
+// 根据回复完善需求
+ipcMain.handle('req-analyzer:refine-requirements', async (event, questionList, replies, allData, confirmedIssues, language) => {
+  try {
+    await ensureReqAnalyzerReady();
+    const onProgress = (progress) => {
+      event.sender.send('req-analyzer:progress', progress);
+    };
+    return await reqAnalyzer.refineRequirements(questionList, replies, allData, confirmedIssues || [], onProgress, language || 'zh-TW');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 保存需求文件
+ipcMain.handle('req-analyzer:save-requirement-file', async (event, content, moduleName, filename) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return await reqAnalyzer.saveRequirementFile(content, moduleName, filename || 'need.txt');
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 列出已保存的需求文件
+ipcMain.handle('req-analyzer:list-saved-files', async (event) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return reqAnalyzer.listSavedFiles();
+  } catch (error) {
+    return [];
+  }
+});
+
+// 删除已保存的需求文件
+ipcMain.handle('req-analyzer:delete-saved-file', async (event, moduleName) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return reqAnalyzer.deleteSavedFile(moduleName);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取配置
+ipcMain.handle('req-analyzer:get-config', async (event) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return reqAnalyzer.getConfig();
+  } catch (error) {
+    return { error: error.message };
+  }
+});
+
+// 更新配置
+ipcMain.handle('req-analyzer:update-config', async (event, updates) => {
+  try {
+    await ensureReqAnalyzerReady();
+    reqAnalyzer.updateConfig(updates);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 设置当前需求名称
+ipcMain.handle('req-analyzer:set-current-requirement', async (event, name) => {
+  try {
+    await ensureReqAnalyzerReady();
+    reqAnalyzer.setCurrentRequirement(name);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取已有需求列表
+ipcMain.handle('req-analyzer:list-requirements', async (event) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return reqAnalyzer.listRequirements();
+  } catch (error) {
+    return [];
+  }
+});
+
+// 加载缓存数据
+ipcMain.handle('req-analyzer:load-cached-data', async (event, requirementName) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return reqAnalyzer.loadCachedData(requirementName);
+  } catch (error) {
+    return {};
+  }
+});
+
+// 推断需求名称
+ipcMain.handle('req-analyzer:infer-requirement-name', async (event, sheetsData) => {
+  try {
+    await ensureReqAnalyzerReady();
+    return reqAnalyzer.inferRequirementName(sheetsData);
+  } catch (error) {
+    return [];
+  }
+});
+
+// 删除指定需求
+ipcMain.handle('req-analyzer:delete-requirement', async (event, requirementName) => {
+  try {
+    await ensureReqAnalyzerReady();
+    reqAnalyzer.deleteRequirement(requirementName);
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// 获取保存路径预览
+ipcMain.handle('req-analyzer:get-save-path-preview', async (event, moduleName) => {
+  try {
+    const { DATA_DIR } = require('../config/data-dir');
+    const pathMod = require('path');
+    const projectPath = reqAnalyzer?.projectPath || '';
+    const projectName = pathMod.basename(projectPath || 'unknown');
+    const safeModuleName = (moduleName || '').replace(/[<>:"/\\|?*]/g, '_').trim();
+    const saveDir = pathMod.join(DATA_DIR, projectName, safeModuleName);
+    const filePath = pathMod.join(saveDir, 'need.txt');
+    return { saveDir, filePath };
+  } catch (error) {
+    return { saveDir: '', filePath: '', error: error.message };
   }
 });
 

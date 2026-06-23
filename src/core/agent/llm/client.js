@@ -99,7 +99,9 @@ class LLMClient {
 
   /**
    * Initialize Claude Code client
-   * 不使用 SDK，直接保存配置，在 chat 时使用 HTTP 请求
+   * 根据端点类型选择 SDK：
+   * - Anthropic 原生 API (api.anthropic.com) → 使用 Anthropic SDK
+   * - 其他端点 (代理/DeepSeek等) → 使用 OpenAI SDK (OpenAI 格式兼容性更广)
    */
   initializeClaudeCode() {
     try {
@@ -138,28 +140,51 @@ class LLMClient {
         throw new Error('Claude Code 配置中未找到 API Key');
       }
 
-      // 确保 baseURL 格式正确（不以 / 结尾，不以 /v1 结尾避免 SDK 拼出 /v1/v1）
+      // 确保 baseURL 格式正确（不以 / 结尾）
       if (baseURL.endsWith('/')) {
         baseURL = baseURL.slice(0, -1);
       }
-      if (baseURL.endsWith('/v1')) {
-        baseURL = baseURL.slice(0, -3);
-      }
-
-      // 使用 Anthropic SDK（与成功案例一致）
-      const Anthropic = require('@anthropic-ai/sdk');
-      // 增加默认超时时间到 10 分钟（600000ms）
-      this.client = new Anthropic({
-        apiKey: apiKey,
-        baseURL: baseURL,
-        timeout: timeout || 600000  // 10分钟默认超时
-      });
 
       // 设置模型
       this.model = model || 'claude-opus-4-6';
 
-      console.log('[LLM Client] Claude Code 客户端初始化成功 (Anthropic 格式), 模型:', this.model);
-      console.log('[LLM Client] 使用端点:', baseURL);
+      // 检测端点类型：只有真正的 Anthropic API 才用 Anthropic SDK
+      // 其他代理/兼容端点（cdskysoft、DeepSeek、OpenRouter 等）统一用 OpenAI 格式
+      const isAnthropicNative = baseURL.includes('anthropic.com') && !baseURL.includes('cdskysoft');
+      // 某些端点的 /anthropic 路径不可靠，不作为 Anthropic 格式判断依据
+
+      if (isAnthropicNative) {
+        // Anthropic 原生 API → 使用 Anthropic SDK
+        console.log('[LLM Client] 检测到 Anthropic 原生端点，使用 Anthropic SDK');
+        // 去掉可能存在的 /v1 后缀（Anthropic SDK 自己会加）
+        let anthropicBase = baseURL;
+        if (anthropicBase.endsWith('/v1')) anthropicBase = anthropicBase.slice(0, -3);
+
+        const Anthropic = require('@anthropic-ai/sdk');
+        this.client = new Anthropic({
+          apiKey: apiKey,
+          baseURL: anthropicBase,
+          timeout: timeout || 600000
+        });
+        this.clientFormat = 'anthropic'; // 标记客户端格式
+      } else {
+        // 代理/兼容端点 → 使用 OpenAI SDK
+        console.log('[LLM Client] 检测到兼容端点，使用 OpenAI SDK (格式兼容性更广)');
+        // 确保 baseURL 格式适合 OpenAI SDK（需要 /v1 路径）
+        let openaiBase = baseURL;
+        if (!openaiBase.endsWith('/v1')) openaiBase += '/v1';
+
+        const OpenAI = require('openai');
+        this.client = new OpenAI({
+          apiKey: apiKey,
+          baseURL: openaiBase,
+          timeout: timeout || 600000,
+          dangerouslyAllowBrowser: true,
+        });
+        this.clientFormat = 'openai'; // 标记客户端格式
+      }
+
+      console.log('[LLM Client] Claude Code 客户端初始化成功, 格式:', this.clientFormat, '模型:', this.model, '端点:', baseURL);
       try {
         const fs = require('fs'); const p = require('path');
         fs.appendFileSync(p.join('E:', 'AI', 'dev-quality-inspector', 'data', 'debug.log'),
@@ -240,9 +265,14 @@ class LLMClient {
       case 'glm':
         return await this.chatOpenAI(requestOptions);
       case 'anthropic':
-      case 'claude-code':
-        // 使用 Anthropic SDK（与成功案例一致）
         return await this.chatAnthropic(requestOptions);
+      case 'claude-code':
+        // 根据端点类型选择正确的 SDK 格式
+        if (this.clientFormat === 'openai') {
+          return await this.chatOpenAI(requestOptions);
+        } else {
+          return await this.chatAnthropic(requestOptions);
+        }
       case 'ollama':
         return await this.chatOllama(requestOptions);
       case 'custom':
@@ -919,6 +949,16 @@ class LLMClient {
   async *chatStream(messages, options = {}) {
     const streamOptions = { ...options, stream: true };
 
+    // claude-code provider 根据 clientFormat 选择流式格式
+    if (this.provider === 'claude-code') {
+      if (this.clientFormat === 'openai') {
+        yield* this.streamOpenAI(messages, streamOptions);
+      } else {
+        yield* this.streamAnthropic(messages, streamOptions);
+      }
+      return;
+    }
+
     switch (this.provider) {
       case 'openai':
       case 'azure':
@@ -965,8 +1005,22 @@ class LLMClient {
    */
   async *streamAnthropic(messages, options) {
     try {
+      console.log(`[LLM Client] streamAnthropic 开始:`, {
+        provider: this.provider,
+        model: this.model,
+        baseURL: this.client?.baseURL,
+        messagesCount: messages?.length,
+        maxTokens: options.maxTokens ?? 2000,
+      });
+
       const systemMessage = messages.find(m => m.role === 'system');
       const chatMessages = messages.filter(m => m.role !== 'system');
+
+      console.log(`[LLM Client] streamAnthropic 发送请求:`, {
+        model: this.model,
+        systemLength: systemMessage?.content?.length || 0,
+        chatMessagesCount: chatMessages.length,
+      });
 
       const stream = await this.client.messages.create({
         model: this.model,
@@ -979,14 +1033,36 @@ class LLMClient {
         stream: true
       });
 
+      console.log(`[LLM Client] streamAnthropic 连接成功，开始接收流...`);
+
       for await (const chunk of stream) {
         if (chunk.type === 'content_block_delta') {
           yield { type: 'content', content: chunk.delta.text };
+        } else if (chunk.type === 'message_start' || chunk.type === 'message_delta' || chunk.type === 'content_block_start' || chunk.type === 'content_block_stop') {
+          // Anthropic stream protocol metadata events - just continue
+          continue;
+        } else {
+          console.log(`[LLM Client] streamAnthropic 未知事件类型: ${chunk.type}`, chunk);
         }
       }
 
+      console.log(`[LLM Client] streamAnthropic 流式完成`);
       yield { type: 'done' };
     } catch (error) {
+      console.error(`[LLM Client] streamAnthropic 失败:`, {
+        message: error.message,
+        status: error.status,
+        name: error.name,
+        model: this.model,
+        provider: this.provider,
+        baseURL: this.client?.baseURL,
+      });
+      // 详细错误信息
+      try {
+        const fs = require('fs'); const p = require('path');
+        fs.appendFileSync(p.join('E:', 'AI', 'dev-quality-inspector', 'data', 'debug.log'),
+          `[${new Date().toISOString()}] [streamAnthropic 失败] provider=${this.provider}, model=${this.model}, baseURL=${this.client?.baseURL}, error=${error.message}, status=${error.status}, name=${error.name}\n`);
+      } catch(e) {}
       yield { type: 'error', error: error.message };
     }
   }

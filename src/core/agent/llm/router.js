@@ -120,6 +120,17 @@ const MODEL_SPECS = {
   },
 
   // ZhipuAI (GLM) models
+  // GLM-5.1 默认使用 claude-code provider (从用户配置读取)
+  'glm-5.1': {
+    provider: 'claude-code',
+    maxTokens: 128000,
+    costPer1kTokens: { input: 0.001, output: 0.002 },
+    capabilities: ['code', 'analysis', 'planning', 'reasoning', 'tools', 'simple'],
+    speed: 'fast',
+    quality: 'very-high',
+    supportsTools: true,
+    supportsThinking: true
+  },
   // GLM-5 默认使用 claude-code provider (从 .claude 配置读取)
   'glm-5': {
     provider: 'claude-code',
@@ -221,11 +232,10 @@ class LLMRouter {
     const claudeClientConfig = this.claudeConfig.getClientConfig();
 
     this.config = {
-      // Default model preferences - 使用 Claude Code 配置
-      // GLM-5 需要付费资源包，默认使用 GLM-4-flash
-      defaultModel: config.defaultModel || 'glm-4-flash',
-      highQualityModel: config.highQualityModel || 'glm-4-flash',
-      fastModel: config.fastModel || 'glm-4-flash',
+      // 默认模型偏好 - 智谱 GLM-5.1
+      defaultModel: config.defaultModel || 'glm-5.1',
+      highQualityModel: config.highQualityModel || 'glm-5.1',
+      fastModel: config.fastModel || 'glm-5.1',
 
       // Claude Code 配置优先
       claudeCodeEnabled: config.claudeCodeEnabled !== false,  // 默认启用
@@ -291,7 +301,7 @@ class LLMRouter {
       // glm-4-flash 免费版有更严格的速率限制
       // 增加到 20 秒间隔，避免多轮累积触发 429
       minInterval = Math.max(minInterval, 20000);
-    } else if (modelName === 'glm-5') {
+    } else if (modelName === 'glm-5' || modelName === 'glm-5.1') {
       minInterval = Math.max(minInterval, 5000);
     }
 
@@ -368,7 +378,7 @@ class LLMRouter {
       this.clients.set('zhipu', new LLMClient({
         provider: 'zhipu',
         apiKey: this.config.zhipuApiKey,
-        model: 'glm-4-flash',
+        model: 'glm-5.1',
         baseURL: 'https://newapi.cdskysoft.cn/v1/',
         timeout: this.config.timeout || 180000
       }));
@@ -395,7 +405,7 @@ class LLMRouter {
       this.clients.set('zhipu-glm5-coding', new LLMClient({
         provider: 'zhipu',
         apiKey: this.config.zhipuApiKey,
-        model: 'glm-5',
+        model: 'glm-5.1',
         baseURL: 'https://newapi.cdskysoft.cn/v1/',
         timeout: this.config.timeout || 180000
       }));
@@ -404,7 +414,7 @@ class LLMRouter {
       this.clients.set('zhipu-glm5', new LLMClient({
         provider: 'zhipu',
         apiKey: this.config.zhipuApiKey,
-        model: 'glm-5',
+        model: 'glm-5.1',
         baseURL: 'https://newapi.cdskysoft.cn/v1/',
         timeout: this.config.timeout || 180000
       }));
@@ -590,9 +600,9 @@ class LLMRouter {
       return await client.chat(messages, options);
     }
 
-    // 如果模型是 glm-5 且 claude-code 可用，优先使用 claude-code
-    if (modelName === 'glm-5' && this.clients.has('claude-code')) {
-      console.log('[LLM Router] 使用 claude-code 客户端（glm-5 通过 Anthropic 兼容端点）');
+    // 如果模型是 glm-5/5.1 且 claude-code 可用，优先使用 claude-code
+    if ((modelName === 'glm-5' || modelName === 'glm-5.1') && this.clients.has('claude-code')) {
+      console.log(`[LLM Router] 使用 claude-code 客户端（${modelName} 通过 Anthropic 兼容端点）`);
       const client = this.clients.get('claude-code');
       return await client.chat(messages, options);
     }
@@ -600,8 +610,8 @@ class LLMRouter {
     // 选择合适的客户端
     let client;
 
-    // GLM-5 特殊处理：根据是否有 tools 参数选择不同的客户端
-    if (modelName === 'glm-5') {
+    // GLM-5/5.1 特殊处理：根据是否有 tools 参数选择不同的客户端
+    if (modelName === 'glm-5' || modelName === 'glm-5.1') {
       if (options.tools) {
         client = this.clients.get('zhipu-glm5');
         console.log('[LLM Router] 使用 zhipu-glm5 客户端（标准端点，支持 tools）');
@@ -659,8 +669,9 @@ class LLMRouter {
 
     if (this.glm5FallbackActive && (now - this.glm5FallbackTimestamp < FALLBACK_CACHE_DURATION)) {
       // 回退状态仍然有效，直接使用 glm-4-flash
-      if (!options.model && this.selectModel(taskType, options) === 'glm-5') {
-        console.log('[LLM Router] GLM-5 回退状态有效，直接使用 GLM-4-flash');
+      const selectedModel = this.selectModel(taskType, options);
+      if (!options.model && (selectedModel === 'glm-5' || selectedModel === 'glm-5.1')) {
+        console.log('[LLM Router] GLM-5/5.1 回退状态有效，直接使用 GLM-4-flash');
         options = { ...options, model: 'glm-4-flash' };
       }
     } else if (now - this.glm5FallbackTimestamp >= FALLBACK_CACHE_DURATION) {
@@ -713,9 +724,9 @@ class LLMRouter {
       });
     }
 
-    // GLM-5 智能回退机制：如果遇到付费限制，自动回退到 glm-4-flash
-    if (modelName === 'glm-5' && this.shouldFallbackFromGLM5(result)) {
-      console.warn('[LLM Router] GLM-5 遇到付费限制或速率限制，自动回退到 GLM-4-flash');
+    // GLM-5/5.1 智能回退机制：如果遇到付费限制，自动回退到 glm-4-flash
+    if ((modelName === 'glm-5' || modelName === 'glm-5.1') && this.shouldFallbackFromGLM5(result)) {
+      console.warn('[LLM Router] GLM-5/5.1 遇到付费限制或速率限制，自动回退到 GLM-4-flash');
 
       // 激活回退状态（会话级别记忆）
       this.glm5FallbackActive = true;

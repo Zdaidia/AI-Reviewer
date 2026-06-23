@@ -10,6 +10,7 @@ const toolbarButtons = [
   { id: 'addFile', label: 'Add File/Folder', icon: '📁' },
   { id: 'scanCode', label: 'Scan Code', icon: '🔍' },
   { id: 'addTodo', label: 'Code Review', icon: '📝' },
+  { id: 'reqAnalyzer', label: '需求分析', icon: '📋' },
   { id: 'settings', label: 'Settings', icon: '⚙️' },
   { id: 'agentChat', label: 'Agent Chat', icon: '💬' },
   { id: 'aiTest', label: 'AI Test', icon: '🧪' },

@@ -99,8 +99,9 @@ function AiConfigModal({ isOpen, onClose, onSave, initialConfig }) {
               onChange={(e) => handleChange('provider', e.target.value)}
               className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <option value="claude-code">Claude Code (推荐)</option>
-              <option value="zhipu">智谱 AI</option>
+              <option value="zhipu">智谱 AI (推荐)</option>
+              <option value="claude-code">Claude Code</option>
+              <option value="deepseek">DeepSeek</option>
               <option value="openai">OpenAI</option>
               <option value="anthropic">Anthropic</option>
               <option value="azure">Azure OpenAI</option>
@@ -148,7 +149,8 @@ function AiConfigModal({ isOpen, onClose, onSave, initialConfig }) {
               onChange={(e) => handleChange('model', e.target.value)}
               className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
-              <option value="glm-5">GLM-5 (推荐)</option>
+              <option value="glm-5.1">GLM-5.1 (推荐)</option>
+              <option value="glm-5">GLM-5</option>
               <option value="glm-4-flash">GLM-4 Flash</option>
               <option value="glm-4">GLM-4</option>
               <option value="gpt-4-turbo">GPT-4 Turbo</option>
