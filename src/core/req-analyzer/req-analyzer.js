@@ -769,12 +769,35 @@ module.exports = ReqAnalyzer;
 
 /**
  * 从 PDF 页面文本中提取标题
- * 取文本前 100 字的第一个非空行，截断到 30 字
+ * 过滤掉页码、图表标签、短行等噪音，取第一个有实质内容的行
  */
 function extractPageTitle(text) {
   if (!text || !text.trim()) return `页面`;
-  const firstLines = text.trim().split(/\n/).filter(l => l.trim());
-  if (firstLines.length === 0) return `页面`;
-  const title = firstLines[0].trim().substring(0, 30);
-  return title || `页面`;
+  const lines = text.trim().split(/\n/).filter(l => l.trim());
+  if (lines.length === 0) return `页面`;
+
+  // 噪音行模式：纯数字、图表标签、短行（<=3字符）
+  const noisePatterns = [
+    /^\d+$/,                              // 纯数字（页码）
+    /^[图表][表图]\s*\d/i,                 // 图1、表1 等
+    /^figure\s*\d/i,                       // Figure 1
+    /^table\s*\d/i,                        // Table 1
+    /^fig\.\s*\d/i,                        // Fig. 1
+    /^第\s*\d+\s*[章节部分页]/i,            // 第1章、第2节、第3页
+    /^\[\d+\]$/,                           // [1] 引用标记
+    /^-\s*\d+\s*-/,                        // - 1 - 页码格式
+    /^page\s*\d/i,                         // Page 1
+  ];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    // 跳过过短的行（<=3字符，大概率是页码或标记）
+    if (trimmed.length <= 3) continue;
+    // 跳过匹配噪音模式的行
+    if (noisePatterns.some(p => p.test(trimmed))) continue;
+    return trimmed;
+  }
+
+  // 全部被过滤后，回退到第一个非空行
+  return lines[0].trim() || `页面`;
 }

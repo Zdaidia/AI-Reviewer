@@ -128,7 +128,6 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
   const [newIssuesCheck, setNewIssuesCheck] = useState(null);
 
   // Tab 5: 一键执行 + 保存
-  const [moduleName, setModuleName] = useState('');
   const [savePathPreview, setSavePathPreview] = useState('');
   const [saveResult, setSaveResult] = useState(null);
   const [isExecuting, setIsExecuting] = useState(false);
@@ -156,16 +155,16 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
   // 会话追踪：弹窗关闭时递增，忽略旧会话的 IPC 返回结果
   const sessionRef = useRef(0);
 
-  // moduleName 变化时获取真实保存路径
+  // requirementName 变化时获取保存路径预览
   useEffect(() => {
-    if (moduleName.trim()) {
-      electronAPI.reqAnalyzerGetSavePathPreview(moduleName).then(result => {
+    if (requirementName.trim()) {
+      electronAPI.reqAnalyzerGetSavePathPreview(requirementName).then(result => {
         if (result.filePath) setSavePathPreview(result.filePath);
       }).catch(() => setSavePathPreview(''));
     } else {
       setSavePathPreview('');
     }
-  }, [moduleName]);
+  }, [requirementName]);
 
   // Modal 打开时初始化
   useEffect(() => {
@@ -823,8 +822,8 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
   }, [refinedRequirements]);
 
   async function handleSave() {
-    if (!moduleName.trim()) {
-      showToast('请输入模块名', 'warning');
+    if (!requirementName.trim()) {
+      showToast('请输入需求名称', 'warning');
       return;
     }
     if (!refinedRequirements) {
@@ -854,7 +853,7 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
         .map(s => s.content.trim())
         .join('\n\n');
 
-      const result = await electronAPI.reqAnalyzerSaveRequirementFile(mergedContent, moduleName, 'need.txt');
+      const result = await electronAPI.reqAnalyzerSaveRequirementFile(mergedContent, requirementName, 'need.txt');
       if (result.success) {
         setSaveResult(result);
         showToast(`需求文件已保存到: ${result.filePath}`, 'success', 5000);
@@ -878,11 +877,11 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
   }
 
   // 删除已保存的文件
-  async function handleDeleteSavedFile(moduleName) {
+  async function handleDeleteSavedFile(name) {
     try {
-      const result = await electronAPI.reqAnalyzerDeleteSavedFile(moduleName);
+      const result = await electronAPI.reqAnalyzerDeleteSavedFile(name);
       if (result.success) {
-        showToast(`已删除: ${moduleName}`, 'success');
+        showToast(`已删除: ${name}`, 'success');
         setSaveResult(null);
         setRefinedRequirements(null);
         await loadSavedFiles();
@@ -922,9 +921,32 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
   }
 
   // 需求名称处理
+  // 重置所有数据状态（切换/清空需求名时调用）
+  function resetDataStates() {
+    setSheetsData(null);
+    setLocalFileData(null);
+    setSelectedPages(new Set());
+    setFigmaData(null);
+    setFigmaLayers([]);
+    setSelectedLayerIds([]);
+    setFigmaNodeId('');
+    setFigmaNodeName('');
+    setConfirmedIssues(null);
+    setQuestionList([]);
+    setQuestionSheetUrl('');
+    setRepliesData(null);
+    setRefinedRequirements(null);
+    setIterationCount(1);
+    setNewIssuesCheck(null);
+    setQuestionsWritten(false);
+    setRequirementNameSuggestions([]);
+  }
+
   async function handleSelectRequirement(name) {
     setRequirementName(name);
     setIsNewRequirement(false);
+    // 先重置，再加载新需求的数据
+    resetDataStates();
     try {
       await electronAPI.reqAnalyzerSetCurrentRequirement(name);
       // 加载缓存数据
@@ -1028,6 +1050,10 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
                       setIsNewRequirement(false);
                     }
                   }
+                  // 清空需求名时重置所有数据状态
+                  if (!val.trim()) {
+                    resetDataStates();
+                  }
                 }}
                 placeholder="输入需求名称或搜索已有需求..."
                 className="req-analyzer-input-wide"
@@ -1040,6 +1066,7 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
                   onClick={() => {
                     setRequirementName('');
                     setIsNewRequirement(true);
+                    resetDataStates();
                   }}
                   title="清空"
                 >
@@ -1764,11 +1791,11 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
                   )}
 
                   <div className="req-analyzer-form-group">
-                    <label>模块名:</label>
+                    <label>需求名称:</label>
                     <ClearableInput
-                      value={moduleName}
-                      onChange={(e) => setModuleName(e.target.value)}
-                      placeholder="输入模块名（决定保存路径）..."
+                      value={requirementName}
+                      onChange={(e) => setRequirementName(e.target.value)}
+                      placeholder="输入需求名称（决定保存路径和 Sheet tab 名）..."
                       className="req-analyzer-input"
                     />
                   </div>

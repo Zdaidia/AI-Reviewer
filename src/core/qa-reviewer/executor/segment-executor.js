@@ -436,6 +436,30 @@ class SegmentExecutor {
   }
 
   /**
+   * 根据复杂度动态计算对话轮次预算
+   * @param {Object} segment - 分段对象，需包含 complexity 或 files
+   * @returns {{ maxTurns: number, warningTurn: number, finalTurn: number }}
+   */
+  calculateTurnBudget(segment) {
+    const complexity = segment.complexity || this.calculateSegmentComplexity(segment.files || []);
+    const level = complexity.level || 'medium';
+
+    const MAX_TURNS_BY_LEVEL = {
+      low: 10,
+      medium: 15,
+      high: 20,
+      'very-high': 25
+    };
+
+    const maxTurns = MAX_TURNS_BY_LEVEL[level] || 15;
+    const warningTurn = Math.floor(maxTurns * 0.67);
+    const finalTurn = maxTurns - 2;
+
+    console.log(`[SegmentExecutor] 轮次预算: 复杂度=${level}, maxTurns=${maxTurns}, warning=${warningTurn}, final=${finalTurn}`);
+    return { maxTurns, warningTurn, finalTurn };
+  }
+
+  /**
    * 智能分段：根据复杂度将文件分组
    * @param {Array} files - 所有文件
    * @param {Object} context - 上下文
@@ -766,24 +790,25 @@ class SegmentExecutor {
       contractChecking: false,
       robustnessChecking: false,
       securityChecking: false,
-      optimization: false
+      accessibility: false,
+      compatibility: false,
+      performance: false,
+      maintainability: false
     };
 
     // 兼容数组格式和对象格式
     let enabledDimensions = {};
 
     if (Array.isArray(dimensions)) {
-      // 数组格式：['functionality', 'uiConsistency', ...] 转换为对象格式
       dimensions.forEach(dim => {
         enabledDimensions[dim] = true;
       });
       console.log('[SegmentExecutor] dimensions 是数组格式，已转换为对象:', enabledDimensions);
     } else {
-      // 对象格式：直接使用
       enabledDimensions = dimensions || {};
     }
 
-    // 映射维度到审查任务（五维对齐审查架构）
+    // 映射维度到审查任务（八维独立审查架构）
     // 支持新八维名称（直接匹配）和旧名称（兼容映射）
 
     // 维度 1: Requirement Matching（需求匹配）
@@ -806,21 +831,33 @@ class SegmentExecutor {
       tasks.securityChecking = true;
     }
 
-    // 维度 5: Optimization（优化建议）
-    if (enabledDimensions.optimization || enabledDimensions.quality || enabledDimensions.performance || enabledDimensions.maintainability || enabledDimensions.accessibility || enabledDimensions.compatibility) {
-      tasks.optimization = true;
+    // 维度 5-8: 各子维度独立启用（不再捆绑到 optimization）
+    if (enabledDimensions.accessibility || enabledDimensions.optimization) {
+      tasks.accessibility = true;
+    }
+    if (enabledDimensions.compatibility || enabledDimensions.optimization) {
+      tasks.compatibility = true;
+    }
+    if (enabledDimensions.performance || enabledDimensions.optimization || enabledDimensions.quality) {
+      tasks.performance = true;
+    }
+    if (enabledDimensions.maintainability || enabledDimensions.optimization || enabledDimensions.quality) {
+      tasks.maintainability = true;
     }
 
-    // 如果没有指定任何维度，默认启用所有任务（五维全面审查）
+    // 如果没有指定任何维度，默认启用所有任务（八维全面审查）
     if (Object.keys(enabledDimensions).length === 0) {
       tasks.requirementMatching = true;
       tasks.contractChecking = true;
       tasks.robustnessChecking = true;
       tasks.securityChecking = true;
-      tasks.optimization = true;
+      tasks.accessibility = true;
+      tasks.compatibility = true;
+      tasks.performance = true;
+      tasks.maintainability = true;
     }
 
-    console.log('[SegmentExecutor] 审查任务配置 (五维对齐):', tasks);
+    console.log('[SegmentExecutor] 审查任务配置 (八维独立):', tasks);
     return tasks;
   }
 
@@ -1090,7 +1127,7 @@ class SegmentExecutor {
   - 同一代码位置的同一问题，只报告一次，选择最贴切的维度和 ruleId
   - 不要在多个维度中重复报告相同的代码缺陷（如健壮性和性能都提到"资源未释放"，只在一个维度报告）`;
 
-    // 按顺序添加字段（五维顺序）
+    // 按顺序添加字段（八维顺序）
     if (reviewTasks.requirementMatching) {
       fields += requirementMatchingTemplate;
     }
@@ -1103,10 +1140,16 @@ class SegmentExecutor {
     if (reviewTasks.securityChecking) {
       fields += securityCheckingTemplate;
     }
-    if (reviewTasks.optimization) {
+    if (reviewTasks.accessibility) {
       fields += accessibilityTemplate;
+    }
+    if (reviewTasks.compatibility) {
       fields += compatibilityTemplate;
+    }
+    if (reviewTasks.performance) {
       fields += performanceTemplate;
+    }
+    if (reviewTasks.maintainability) {
       fields += maintainabilityTemplate;
     }
 
@@ -2889,6 +2932,9 @@ ${requirements}
     const useFunctionCalling = context.useFunctionCalling !== false;
     const tools = useFunctionCalling ? this.buildToolsDefinition(segment, context) : null;
 
+    // 计算动态轮次预算（Coding Plan 模式只用 1 轮，但仍需预算信息供系统提示使用）
+    const turnBudget = this.calculateTurnBudget(segment);
+
     if (!useFunctionCalling) {
       console.log('[SegmentExecutor] Function Calling 已禁用，使用 Coding Plan 端点（一次性发送所有代码）');
     } else {
@@ -3205,6 +3251,11 @@ ${truncatedContent}
 - **只评论你通过工具获取的信息，不要猜测或推断**
 - **禁止报告"需求不明确"、"API 文档不清楚"等问题**
 
+【对话预算】本次审查最多 ${turnBudget.maxTurns} 轮对话。
+- 第 ${turnBudget.warningTurn} 轮起：优先输出分析结论，未读的关键文件用 get_file_summary 快速了解
+- 第 ${turnBudget.finalTurn} 轮起：工具调用将被禁用，必须输出 JSON 结论
+请合理规划每轮操作，避免在早期轮次重复读取同一文件。
+
 【项目信息】
 - 项目路径: ${projectPath}
 - 审查功能: ${(segment.features || []).join(', ')}
@@ -3299,23 +3350,23 @@ ${reviewTasks.securityChecking ? `- inputSecurity: XSS 防护（dangerouslySetIn
 - dataSecurity: 敏感信息脱敏、密钥硬编码检查、本地存储安全
 - authSecurity: 权限校验、Token/Session 管理、CSRF 防护` : ''}
 
-**维度 5: Accessibility（无障碍性）** ${reviewTasks.optimization ? '✓ 启用' : '✗ 跳过'}
-${reviewTasks.optimization ? `- ariaSupport: 无障碍标签、语义化、屏幕阅读器兼容
+**维度 5: Accessibility（无障碍性）** ${reviewTasks.accessibility ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.accessibility ? `- ariaSupport: 无障碍标签、语义化、屏幕阅读器兼容
 - keyboardNav: 键盘导航、焦点管理、Tab 顺序
 - colorContrast: 颜色对比度、文字可读性` : ''}
 
-**维度 6: Compatibility（兼容性）** ${reviewTasks.optimization ? '✓ 启用' : '✗ 跳过'}
-${reviewTasks.optimization ? `- browserCompat: 跨浏览器、API 兼容性
+**维度 6: Compatibility（兼容性）** ${reviewTasks.compatibility ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.compatibility ? `- browserCompat: 跨浏览器、API 兼容性
 - responsive: 响应式适配、不同屏幕尺寸
 - i18n: 多语言支持、文本方向、日期格式` : ''}
 
-**维度 7: Performance（性能）** ${reviewTasks.optimization ? '✓ 启用' : '✗ 跳过'}
-${reviewTasks.optimization ? `- renderOpt: 渲染优化、不必要重建、大列表
+**维度 7: Performance（性能）** ${reviewTasks.performance ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.performance ? `- renderOpt: 渲染优化、不必要重建、大列表
 - resourceMgmt: 内存泄漏、定时器清理、Controller dispose
 - networkOpt: 重复请求、缓存策略` : ''}
 
-**维度 8: Maintainability（可维护性）** ${reviewTasks.optimization ? '✓ 启用' : '✗ 跳过'}
-${reviewTasks.optimization ? `- codeStructure: 组件拆分、重复代码、命名规范
+**维度 8: Maintainability（可维护性）** ${reviewTasks.maintainability ? '✓ 启用' : '✗ 跳过'}
+${reviewTasks.maintainability ? `- codeStructure: 组件拆分、重复代码、命名规范
 - naming: 方法名/变量名/类名拼写检查（如 handel→handle、recieve→receive 等常见拼写错误必须报告）
 - errorHandling: 统一错误处理模式、日志记录
 - readability: 注释完整性、复杂度控制` : ''}
@@ -3406,17 +3457,31 @@ ${reviewTasks.securityChecking ? `- inputSecurity: XSS 防護（dangerouslySetIn
 - dataSecurity: 敏感信息脫敏、密鑰硬編碼檢查、本地存儲安全
 - authSecurity: 權限校驗、Token/Session 管理、CSRF 防護` : ''}
 
-**维度 5: Optimization（優化建議）** ${reviewTasks.optimization ? '✓' : '✗'}
-${reviewTasks.optimization ? `- codeStructure: 組件拆分、重複代碼、命名規範、命名拼寫檢查（如 handel→handle，必須報告）、註釋完整性
-- performance: 不必要渲染、大列表優化、圖片/資源優化、算法複雜度
-- maintainability: 單一職責、依賴注入、配置外部化、日誌支持` : ''}
+**维度 5: Accessibility（無障礙性）** ${reviewTasks.accessibility ? '✓' : '✗'}
+${reviewTasks.accessibility ? `- ariaSupport: 無障礙標籤、語義化、屏幕閱讀器兼容
+- keyboardNav: 鍵盤導航、焦點管理
+- colorContrast: 顏色對比度、文字可讀性` : ''}
+**维度 6: Compatibility（兼容性）** ${reviewTasks.compatibility ? '✓' : '✗'}
+${reviewTasks.compatibility ? `- browserCompat: 跨瀏覽器兼容
+- responsive: 響應式適配
+- i18n: 多語言支持` : ''}
+**维度 7: Performance（性能）** ${reviewTasks.performance ? '✓' : '✗'}
+${reviewTasks.performance ? `- renderOpt: 不必要渲染、大列表優化
+- resourceMgmt: 資源管理、內存泄漏
+- networkOpt: 重複請求、緩存策略` : ''}
+**维度 8: Maintainability（可維護性）** ${reviewTasks.maintainability ? '✓' : '✗'}
+${reviewTasks.maintainability ? `- codeStructure: 組件拆分、重複代碼、命名規範、命名拼寫檢查（如 handel→handle，必須報告）
+- readability: 註釋完整性、複雜度控制` : ''}
 
 【審查要點】
 ${reviewTasks.requirementMatching ? '- **需求匹配**: 功能缺失、需求遺漏、實現偏差' : ''}
 ${reviewTasks.contractChecking ? '- **契約檢查**: API 規範、參數格式、響應處理' : ''}
 ${reviewTasks.robustnessChecking ? '- **健壯性**: 錯誤處理、邊界校驗、數據驗證、資源管理' : ''}
 ${reviewTasks.securityChecking ? '- **安全性**: XSS 防護、輸入過濾、敏感信息、權限校驗' : ''}
-${reviewTasks.optimization ? '- **優化建議**: 代碼結構、性能優化、可維護性' : ''}
+${reviewTasks.accessibility ? '- **無障礙性**: 無障礙標籤、鍵盤導航、顏色對比度' : ''}
+${reviewTasks.compatibility ? '- **兼容性**: 跨瀏覽器、響應式、多語言' : ''}
+${reviewTasks.performance ? '- **性能**: 渲染優化、資源管理、網絡優化' : ''}
+${reviewTasks.maintainability ? '- **可維護性**: 代碼結構、命名規範、可讀性' : ''}
 
 【输出格式】
 完成分析后，请严格按照以下 JSON 格式输出：
@@ -3562,9 +3627,9 @@ ${reviewTasks.optimization ? '- **優化建議**: 代碼結構、性能優化、
     console.log(`[SegmentExecutor] DEBUG: systemPrompt 包含'空值显示为': ${systemPrompt.includes('空值显示为')}`);
     console.log(`[SegmentExecutor] DEBUG: systemPrompt 长度: ${systemPrompt.length}`);
 
-    const maxTurns = useFunctionCalling ? 15 : 1; // Coding Plan 模式只需要 1 轮
-    const WARNING_TURN = 10;
-    const FINAL_TURN = 13;
+    const maxTurns = useFunctionCalling ? turnBudget.maxTurns : 1; // Coding Plan 模式只需要 1 轮
+    const WARNING_TURN = turnBudget.warningTurn;
+    const FINAL_TURN = turnBudget.finalTurn;
     let finalContent = null;
 
     // 连续空内容工具调用计数器（防止 AI 陷入死循环）
@@ -3592,21 +3657,9 @@ ${reviewTasks.optimization ? '- **優化建議**: 代碼結構、性能優化、
         requestOptions.toolChoice = 'auto';
       }
 
-      // 第 10 轮提醒 AI 注意时间
-      if (turn === WARNING_TURN && useFunctionCalling && !isFinalTurn) {
-        messages.push({
-          role: 'user',
-          content: '提醒：你已进行了 10 轮分析，还剩 5 轮。如果你已读完主要文件，请开始输出你的分析结论。如果还有关键文件未读，优先用 get_file_summary 快速了解。'
-        });
-      }
-
-      // 最后几轮强制输出
+      // 最后几轮强制输出（不再注入伪装 user 消息，预算信息已在系统提示中）
       if (isFinalTurn) {
-        messages.push({
-          role: 'user',
-          content: '你已进行了多轮分析，现在必须输出最终结论。请根据已读取的文件内容，直接输出你的审查结果（JSON 格式），不要再调用任何工具。'
-        });
-        console.log(`[SegmentExecutor] 阶段2 第 ${turn} 轮强制输出模式`);
+        console.log(`[SegmentExecutor] 阶段2 第 ${turn} 轮强制输出模式（禁用工具）`);
       }
 
       const response = await this.callLLMWithRetry('code_analysis', messages, requestOptions);
@@ -4177,6 +4230,9 @@ ${codeContent}
     });
     fileListSummary += '\n⚠️ 注意：上述路径是完整的文件系统路径，使用 read_file 工具时请直接复制使用。\n';
 
+    // 计算动态轮次预算
+    const turnBudget = this.calculateTurnBudget(segment);
+
     // 初始系统提示
     let systemPrompt = `你是一个资深的 QA 工程师，专注于代码审查。
 
@@ -4316,6 +4372,11 @@ ${codeContent}
 - **只评论你通过工具获取的信息，不要猜测或推断**
 - **禁止报告"需求不明确"、"API 文档不清楚"等问题**
 
+【对话预算】本次审查最多 ${turnBudget.maxTurns} 轮对话。
+- 第 ${turnBudget.warningTurn} 轮起：优先输出分析结论，未读的关键文件用 get_file_summary 快速了解
+- 第 ${turnBudget.finalTurn} 轮起：工具调用将被禁用，必须输出 JSON 结论
+请合理规划每轮操作，避免在早期轮次重复读取同一文件。
+
 【项目信息】
 - 项目路径: ${projectPath}
 - 审查功能: ${(segment.features || []).join(', ')}
@@ -4346,14 +4407,14 @@ ${reviewTasks.securityChecking ? `✅ **4. 安全检查**
    - **输入安全**：XSS 防护、输入过滤、注入防护
    - **数据安全**：敏感信息脱敏、密钥硬编码检查、本地存储安全
    - **认证授权**：权限校验、Token/Session 管理、CSRF 防护` : ''}
-${reviewTasks.optimization ? `✅ **5. 无障碍性（accessibility）**
-	   - 无障碍标签与语义化、键盘导航、颜色对比度
-✅ **6. 兼容性（compatibility）**
-	   - 浏览器兼容、响应式适配、国际化支持
-✅ **7. 性能（performance）**
-	   - 渲染优化、资源管理（内存/定时器/Controller dispose）、网络优化
-✅ **8. 可维护性（maintainability）**
-	   - 代码结构（组件拆分、重复代码、命名规范）、命名拼写检查（如 handel→handle，必须报告）、错误处理、可读性` : ''}
+${reviewTasks.accessibility ? '✅ **5. 无障碍性（accessibility）**
+	   - 无障碍标签与语义化、键盘导航、颜色对比度' : ''}
+${reviewTasks.compatibility ? '✅ **6. 兼容性（compatibility）**
+	   - 浏览器兼容、响应式适配、国际化支持' : ''}
+${reviewTasks.performance ? '✅ **7. 性能（performance）**
+	   - 渲染优化、资源管理（内存/定时器/Controller dispose）、网络优化' : ''}
+${reviewTasks.maintainability ? '✅ **8. 可维护性（maintainability）**
+	   - 代码结构（组件拆分、重复代码、命名规范）、命名拼写检查（如 handel→handle，必须报告）、错误处理、可读性' : ''}
 
 ⚠️ **重要**：只检查上述勾选（✅）的维度，未勾选的维度不需要检查！
 
@@ -4620,10 +4681,8 @@ ${reviewTasks.optimization ? `✅ **5. 无障碍性（accessibility）**
       }
     ];
 
-    const maxTurns = 15; // 最多 15 轮对话
+    const { maxTurns, warningTurn: WARNING_TURN, finalTurn: FINAL_TURN } = turnBudget;
     const maxRetries = 3; // 429 错误最大重试次数
-    const WARNING_TURN = 10; // 第 10 轮开始提醒 AI 进入总结阶段
-    const FINAL_TURN = 13; // 第 13 轮起禁止工具调用，强制输出结论
     let finalContent = null;
 
     // 连续空内容工具调用计数器（防止 AI 陷入死循环）
@@ -4634,7 +4693,7 @@ ${reviewTasks.optimization ? `✅ **5. 无障碍性（accessibility）**
       console.log(`[SegmentExecutor] Function Calling 第 ${turn}/${maxTurns} 轮...`);
       _dl(`[checkRequirementsWithTools] 第 ${turn}/${maxTurns} 轮`);
 
-      // 最后几轮：插入提醒消息，禁止工具调用，强制输出结论
+      // 最后几轮：禁止工具调用，强制输出结论
       const isFinalTurn = turn >= FINAL_TURN;
       const requestOptions = {
         temperature: 0.3,
@@ -4643,20 +4702,8 @@ ${reviewTasks.optimization ? `✅ **5. 无障碍性（accessibility）**
         toolChoice: isFinalTurn ? undefined : 'auto',
       };
 
-      // 第 10 轮开始提醒 AI 注意时间
-      if (turn === WARNING_TURN && !isFinalTurn) {
-        messages.push({
-          role: 'user',
-          content: '提醒：你已进行了 10 轮分析，还剩 5 轮。如果你已读完主要文件，请开始输出你的分析结论。如果还有关键文件未读，优先用 get_file_summary 快速了解，而不是 read_file 逐行读取。'
-        });
-      }
-
-      // 第 13 轮开始强制输出：追加一条提醒
+      // 最后几轮强制输出（不再注入伪装 user 消息，预算信息已在系统提示中）
       if (isFinalTurn) {
-        messages.push({
-          role: 'user',
-          content: '你已进行了多轮分析，现在必须输出最终结论。请根据已读取的文件内容，直接输出你的审查结果（JSON 格式），不要再调用任何工具。'
-        });
         console.log(`[SegmentExecutor] 第 ${turn} 轮强制输出模式（禁用工具调用）`);
       }
       let response;

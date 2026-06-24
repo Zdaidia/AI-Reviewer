@@ -3332,6 +3332,8 @@ function getDirectoryStructure(dirPath, depth = 0) {
 
 // Fix network service crash on Windows
 app.commandLine.appendSwitch('disable-features', 'VizDisplayCompositor');
+app.commandLine.appendSwitch('disable-features', 'NetworkService');
+app.commandLine.appendSwitch('no-sandbox');
 
 // Register custom protocol for local images
 protocol.registerSchemesAsPrivileged([
