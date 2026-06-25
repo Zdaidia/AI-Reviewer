@@ -66,6 +66,40 @@ function ClearableInput({ value, onChange, placeholder, className = 'req-analyze
   );
 }
 
+// Drive 树节点递归组件
+function DriveTreeNode({ node, treeNodes, onToggle, onDownload, depth }) {
+  const nodeState = treeNodes.get(node.id);
+  const isExpanded = nodeState?.expanded || false;
+  const children = nodeState?.children || null;
+  const isFolder = node.isFolder || node.isSharedDrive;
+  const icon = node.isSharedDrive ? '🗄️' : isFolder ? '📁' : '📄';
+  const typeLabel = isFolder ? '文件夹' : (node.type === 'unknown' ? 'download' : node.type);
+
+  return (
+    <div>
+      <div
+        className="req-analyzer-tree-node"
+        style={{ paddingLeft: depth * 20 }}
+        onClick={() => isFolder ? onToggle(node.id, node) : onDownload(node.id)}
+      >
+        {isFolder && <span className="req-analyzer-tree-toggle">{isExpanded ? '▼' : '▶'}</span>}
+        <span>{icon} {node.name}</span>
+        {typeLabel && <span className="req-analyzer-file-type">{typeLabel}</span>}
+      </div>
+      {isExpanded && children && children.map(child => (
+        <DriveTreeNode
+          key={child.id}
+          node={child}
+          treeNodes={treeNodes}
+          onToggle={onToggle}
+          onDownload={onDownload}
+          depth={depth + 1}
+        />
+      ))}
+    </div>
+  );
+}
+
 function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
   const [activeTab, setActiveTab] = useState('auth');
   const [requirementName, setRequirementName] = useState('');
@@ -92,11 +126,11 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
   const [driveSearchQuery, setDriveSearchQuery] = useState('');
   const [tableMaxRows, setTableMaxRows] = useState(20);
   const [driveMode, setDriveMode] = useState('search');
-  const [driveFolders, setDriveFolders] = useState([]);
-  const [currentDriveFolder, setCurrentDriveFolder] = useState(null);
-  const [currentSharedDriveId, setCurrentSharedDriveId] = useState(null); // 共享 Drive 上下文
-  const [driveFolderFiles, setDriveFolderFiles] = useState([]);
   const [driveFilter, setDriveFilter] = useState('');
+  // Drive 树状浏览
+  const [driveTreeNodes, setDriveTreeNodes] = useState(new Map()); // key=节点ID, value={children,expanded,driveId}
+  const [driveCategoryExpanded, setDriveCategoryExpanded] = useState({ my: false, shared: false, drives: false });
+  const [driveRootData, setDriveRootData] = useState({ my: [], shared: [], drives: [] });
 
   // Figma (在来源 Tab 内)
   const [figmaUrl, setFigmaUrl] = useState('');
@@ -441,10 +475,14 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
     try {
       const result = await electronAPI.reqAnalyzerListDriveRootFolders();
       if (result.success) {
-        setDriveFolders(result.folders || []);
-        setCurrentDriveFolder(null);
-        setCurrentSharedDriveId(null);
-        setDriveFolderFiles([]);
+        const folders = result.folders || [];
+        setDriveRootData({
+          my: folders.filter(f => !f.isSharedDrive && !f.isSharedWithMe),
+          shared: folders.filter(f => f.isSharedWithMe),
+          drives: folders.filter(f => f.isSharedDrive),
+        });
+        setDriveTreeNodes(new Map());
+        setDriveCategoryExpanded({ my: false, shared: false, drives: false });
       } else {
         showToast(`获取 Drive 文件夹失败: ${result.error}`, 'error');
       }
@@ -453,37 +491,55 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
     }
   }
 
-  async function handleEnterDriveFolder(folderId, opts = {}) {
+  function handleToggleDriveCategory(key) {
+    setDriveCategoryExpanded(prev => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  async function handleToggleDriveTreeNode(nodeId, nodeData) {
+    const newNodes = new Map(driveTreeNodes);
+
+    if (newNodes.has(nodeId) && newNodes.get(nodeId).expanded) {
+      // 折叠：保留缓存但标记未展开
+      const existing = newNodes.get(nodeId);
+      newNodes.set(nodeId, { ...existing, expanded: false });
+      setDriveTreeNodes(newNodes);
+      return;
+    }
+
+    // 已缓存 children，直接展开
+    if (newNodes.has(nodeId) && newNodes.get(nodeId).children) {
+      const existing = newNodes.get(nodeId);
+      newNodes.set(nodeId, { ...existing, expanded: true });
+      setDriveTreeNodes(newNodes);
+      return;
+    }
+
+    // 未缓存，加载 children
     try {
-      const filterOpts = driveFilter ? { mimeType: driveFilter } : {};
-      const mergedOpts = { ...filterOpts, ...opts };
-
-      // 如果是共享 Drive 的根级入口（folderId 等于 driveId）
-      if (mergedOpts.isSharedDriveRoot) {
-        const result = await electronAPI.reqAnalyzerBrowseSharedDriveRoot(folderId);
-        if (result.success) {
-          setCurrentDriveFolder(result.folderId); // 用真实的 rootFolderId
-          setCurrentSharedDriveId(folderId);       // 记住 driveId 供后续浏览
-          setDriveFolderFiles(result.files || []);
-        } else {
-          showToast(`获取共享 Drive 内容失败: ${result.error}`, 'error');
-        }
-        return;
-      }
-
-      // 普通文件夹浏览，在共享 Drive 内时传入 driveId
-      if (currentSharedDriveId) {
-        mergedOpts.driveId = currentSharedDriveId;
-      }
-      const result = await electronAPI.reqAnalyzerListDriveFolderFiles(folderId, mergedOpts);
-      if (result.success) {
-        setCurrentDriveFolder(folderId);
-        setDriveFolderFiles(result.files || []);
+      let result;
+      if (nodeData.isSharedDrive) {
+        result = await electronAPI.reqAnalyzerBrowseSharedDriveRoot(nodeId);
       } else {
-        showToast(`获取文件夹内容失败: ${result.error}`, 'error');
+        const opts = nodeData.driveId ? { driveId: nodeData.driveId } : {};
+        result = await electronAPI.reqAnalyzerListDriveFolderFiles(nodeId, opts);
+      }
+
+      if (result.success) {
+        const children = (result.files || []).map(f => ({
+          ...f,
+          driveId: nodeData.isSharedDrive ? nodeId : (nodeData.driveId || null),
+        }));
+        newNodes.set(nodeId, {
+          children,
+          expanded: true,
+          driveId: nodeData.isSharedDrive ? nodeId : (nodeData.driveId || null),
+        });
+        setDriveTreeNodes(newNodes);
+      } else {
+        showToast(`加载文件夹内容失败: ${result.error}`, 'error');
       }
     } catch (e) {
-      showToast(`获取文件夹内容失败: ${e.message}`, 'error');
+      showToast(`加载文件夹内容失败: ${e.message}`, 'error');
     }
   }
 
@@ -1300,9 +1356,9 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
                         // 切换到浏览模式时自动加载文件夹
                         if (newMode === 'browse') handleBrowseDrive();
                         // 切换模式时清空之前的搜索结果
-                        if (newMode === 'search') setDriveFolders([]);
-                        setCurrentSharedDriveId(null);
-                        setDriveFolderFiles([]);
+                        if (newMode === 'search') setDriveRootData({ my: [], shared: [], drives: [] });
+                        setDriveTreeNodes(new Map());
+                        setDriveCategoryExpanded({ my: false, shared: false, drives: false });
                         setDriveFiles([]);
                       }}
                       className="req-analyzer-row-select"
@@ -1310,28 +1366,6 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
                       <option value="search">搜索模式</option>
                       <option value="browse">浏览模式</option>
                     </select>
-                    {driveMode === 'browse' && (
-                      <select
-                        value={driveFilter}
-                        onChange={(e) => {
-                          const newFilter = e.target.value;
-                          setDriveFilter(newFilter);
-                          // 文件类型改变时重新加载当前文件夹内容
-                          if (currentDriveFolder) {
-                            const opts = newFilter ? { mimeType: newFilter } : {};
-                            handleEnterDriveFolder(currentDriveFolder, opts);
-                          }
-                        }}
-                        className="req-analyzer-row-select"
-                      >
-                        <option value="">全部类型</option>
-                        <option value="pdf">PDF</option>
-                        <option value="docx">DOCX</option>
-                        <option value="xlsx">XLSX</option>
-                        <option value="sheet">Google Sheets</option>
-                        <option value="doc">Google Docs</option>
-                      </select>
-                    )}
                     {driveMode === 'search' && (
                       <select
                         value={driveFilter}
@@ -1359,33 +1393,29 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
                     </div>
                   ) : (
                     <div className="req-analyzer-drive-browser">
-                      {/* 文件夹列表 */}
-                      {driveFolders.length > 0 && (
-                        <div className="req-analyzer-folder-list">
-                          {driveFolders.map(f => (
-                            <div
-                              key={f.id}
-                              className={`req-analyzer-folder-item ${currentDriveFolder === f.id ? 'active' : ''}`}
-                              onClick={() => handleEnterDriveFolder(f.id, f.isSharedDrive ? { isSharedDriveRoot: true } : {})}
-                            >
-                              {f.isSharedDrive ? '🗄️' : f.isSharedWithMe ? '📂' : '📁'} {f.name}
-                              {f.isSharedDrive && <span className="req-analyzer-file-type">共享 Drive</span>}
-                              {f.isSharedWithMe && <span className="req-analyzer-file-type">与我共享</span>}
-                            </div>
+                      {[
+                        { key: 'my', label: '我的 Drive', icon: '📁', items: driveRootData.my },
+                        { key: 'shared', label: '与我共享', icon: '📂', items: driveRootData.shared },
+                        { key: 'drives', label: '共享 Drive', icon: '🗄️', items: driveRootData.drives },
+                      ].map(cat => (
+                        <div key={cat.key} className="req-analyzer-drive-category">
+                          <div className="req-analyzer-category-header" onClick={() => handleToggleDriveCategory(cat.key)}>
+                            <span className="req-analyzer-tree-toggle">{driveCategoryExpanded[cat.key] ? '▼' : '▶'}</span>
+                            <span>{cat.icon} {cat.label}</span>
+                            <span className="req-analyzer-file-type">{cat.items.length} 个</span>
+                          </div>
+                          {driveCategoryExpanded[cat.key] && cat.items.map(item => (
+                            <DriveTreeNode
+                              key={item.id}
+                              node={item}
+                              treeNodes={driveTreeNodes}
+                              onToggle={handleToggleDriveTreeNode}
+                              onDownload={handleDownloadDriveFile}
+                              depth={1}
+                            />
                           ))}
                         </div>
-                      )}
-                      {/* 当前文件夹内的文件 */}
-                      {driveFolderFiles.length > 0 && (
-                        <div className="req-analyzer-file-list">
-                          {driveFolderFiles.map(f => (
-                            <div key={f.id} className="req-analyzer-file-item" onClick={() => f.isFolder ? handleEnterDriveFolder(f.id) : handleDownloadDriveFile(f.id)}>
-                              <span>{f.isFolder ? '📁' : '📄'} {f.name}</span>
-                              <span className="req-analyzer-file-type">{f.type || (f.isFolder ? '文件夹' : '')}</span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
+                      ))}
                     </div>
                   )}
 
@@ -1393,8 +1423,8 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
                     <div className="req-analyzer-file-list">
                       {driveFiles.map(f => (
                         <div key={f.id} className="req-analyzer-file-item" onClick={() => handleDownloadDriveFile(f.id)}>
-                          <span>{f.name}</span>
-                          <span className="req-analyzer-file-type">{f.type}</span>
+                          <span>📄 {f.name}</span>
+                          <span className="req-analyzer-file-type">{f.type === 'download' ? 'download' : f.type}</span>
                         </div>
                       ))}
                     </div>

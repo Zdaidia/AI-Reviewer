@@ -348,7 +348,7 @@ function PageManager({ testPlan, selectedPage, onPageSelect, onPageAdd }) {
         <select
           value={selectedPage || ''}
           onChange={(e) => onPageSelect(e.target.value)}
-          className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+          className="flex-1"
         >
           <option value="">-- 请选择页面 --</option>
           {pageList.map(page => (
@@ -369,7 +369,7 @@ function PageManager({ testPlan, selectedPage, onPageSelect, onPageAdd }) {
             value={newPageName}
             onChange={(e) => setNewPageName(e.target.value)}
             placeholder="输入新页面名称"
-            className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+            className="flex-1"
             onKeyPress={(e) => e.key === 'Enter' && handleAddPage()}
           />
           <button
@@ -963,7 +963,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
                 type="text"
                 value={editingScenario.name}
                 onChange={(e) => setEditingScenario({ ...editingScenario, name: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                className="w-full"
               />
             </div>
 
@@ -972,7 +972,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
               <textarea
                 value={editingScenario.description}
                 onChange={(e) => setEditingScenario({ ...editingScenario, description: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                className="w-full"
                 rows={3}
               />
             </div>
@@ -983,7 +983,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
                 type="text"
                 value={editingScenario.page || ''}
                 onChange={(e) => setEditingScenario({ ...editingScenario, page: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                className="w-full"
               />
             </div>
 
@@ -992,7 +992,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
               <select
                 value={editingScenario.priority || 'Medium'}
                 onChange={(e) => setEditingScenario({ ...editingScenario, priority: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                className="w-full"
               >
                 <option value="High">高</option>
                 <option value="Medium">中</option>
@@ -1005,7 +1005,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
               <select
                 value={editingScenario.status || 'Draft'}
                 onChange={(e) => setEditingScenario({ ...editingScenario, status: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white hover:bg-gray-600"
+                className="w-full"
               >
                 <option value="Draft">草稿 (Draft)</option>
                 <option value="Approved">已批准 (Approved)</option>
@@ -1063,7 +1063,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
                                   };
                                   setEditingScenario({ ...editingScenario, steps: updatedSteps });
                                 }}
-                                className="flex-1 px-2 py-1 bg-gray-600 border border-gray-500 rounded text-white text-xs focus:outline-none focus:ring-1 focus:ring-purple-500"
+                                className="flex-1 text-xs"
                                 placeholder="验证描述"
                               />
                             </div>
@@ -1120,7 +1120,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
                 type="text"
                 value={newScenario.name}
                 onChange={(e) => setNewScenario({ ...newScenario, name: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                className="w-full"
                 placeholder="例如: 用户登录功能测试"
               />
             </div>
@@ -1130,7 +1130,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
               <textarea
                 value={newScenario.description}
                 onChange={(e) => setNewScenario({ ...newScenario, description: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                className="w-full"
                 rows={3}
                 placeholder="描述测试用例的目的..."
               />
@@ -1149,7 +1149,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
               <select
                 value={newScenario.priority}
                 onChange={(e) => setNewScenario({ ...newScenario, priority: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                className="w-full"
               >
                 <option value="High">高</option>
                 <option value="Medium">中</option>
@@ -1162,7 +1162,7 @@ function TestCaseEditor({ testPlan, onTestPlanChange, electronAPI, projectPath }
               <select
                 value={newScenario.status || 'Draft'}
                 onChange={(e) => setNewScenario({ ...newScenario, status: e.target.value })}
-                className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                className="w-full"
               >
                 <option value="Draft">草稿 (Draft)</option>
                 <option value="Approved">已批准 (Approved)</option>
@@ -1528,7 +1528,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
 
     // 清理监听
     return () => {
-      if (electronAPI.removeAISmartTestLogListener) {
+      if (electronAPI && electronAPI.removeAISmartTestLogListener) {
         electronAPI.removeAISmartTestLogListener();
       }
     };
@@ -3188,7 +3188,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
                           value={loginConfig.username}
                           onChange={(e) => setLoginConfig(prev => ({ ...prev, username: e.target.value }))}
                           placeholder={loginConfig.mode === 'step' ? '输入ID' : '输入账号'}
-                          className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500"
+                          className="w-full placeholder-gray-500 text-sm"
                         />
                       </div>
                       <div>
@@ -3198,7 +3198,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
                           value={loginConfig.password}
                           onChange={(e) => setLoginConfig(prev => ({ ...prev, password: e.target.value }))}
                           placeholder="输入密码"
-                          className="w-full px-3 py-2 bg-gray-900 border border-gray-600 rounded text-white placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-purple-500"
+                          className="w-full placeholder-gray-500 text-sm"
                         />
                       </div>
                     </div>
@@ -3471,7 +3471,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
             onChange={(e) => setTestPage(e.target.value)}
             placeholder="例如: 登录页、首页、商品列表页"
             disabled={isLoading || useSavedTestCases}
-            className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 caret-white focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+            className="w-full placeholder-gray-500 disabled:opacity-50"
           />
         </div>
       )}
@@ -3516,7 +3516,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
                       onChange={(e) => setLoginConfig(prev => ({ ...prev, username: e.target.value }))}
                       placeholder="输入账号"
                       disabled={isLoading || useSavedTestCases}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white placeholder-gray-500 caret-white focus:outline-none focus:ring-1 focus:ring-purple-500 text-sm disabled:opacity-50"
+                      className="w-full placeholder-gray-500 text-sm disabled:opacity-50"
                     />
                   </div>
                   <div>
@@ -3527,7 +3527,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
                       onChange={(e) => setLoginConfig(prev => ({ ...prev, password: e.target.value }))}
                       placeholder="输入密码"
                       disabled={isLoading || useSavedTestCases}
-                      className="w-full px-3 py-2 bg-gray-800 border border-gray-600 rounded text-white placeholder-gray-500 caret-white focus:outline-none focus:ring-1 focus:ring-purple-500 text-sm disabled:opacity-50"
+                      className="w-full placeholder-gray-500 text-sm disabled:opacity-50"
                     />
                   </div>
                 </div>
@@ -3577,7 +3577,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
             onChange={(e) => setFigmaUrl(e.target.value)}
             placeholder="https://www.figma.com/file/..."
             disabled={isLoading || useSavedTestCases}
-            className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 caret-white focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+            className="w-full placeholder-gray-500 disabled:opacity-50"
           />
         </div>
       )}
@@ -4359,7 +4359,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
                   type="text"
                   value={newScenario.name}
                   onChange={(e) => setNewScenario({ ...newScenario, name: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  className="w-full"
                   placeholder="例如: 用户登录功能测试"
                 />
               </div>
@@ -4373,7 +4373,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
                   <select
                     value={newScenario.page || ''}
                     onChange={(e) => setNewScenario({ ...newScenario, page: e.target.value })}
-                    className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    className="flex-1"
                   >
                     <option value="">-- 请选择页面 --</option>
                     {getPageList(selectedSavedTestCase?.testPlan || testPlan).map(page => (
@@ -4385,7 +4385,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
                     value={newScenario.page && !getPageList(selectedSavedTestCase?.testPlan || testPlan).includes(newScenario.page) ? newScenario.page : ''}
                     onChange={(e) => setNewScenario({ ...newScenario, page: e.target.value })}
                     placeholder="或输入新页面"
-                    className="flex-1 px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                    className="flex-1"
                   />
                 </div>
               </div>
@@ -4395,7 +4395,7 @@ function AISmartTestModal({ isOpen, onClose, electronAPI, projectUrl, projectPat
                 <select
                   value={newScenario.priority}
                   onChange={(e) => setNewScenario({ ...newScenario, priority: e.target.value })}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white caret-white focus:outline-none focus:ring-2 focus:ring-purple-500"
+                  className="w-full"
                 >
                   <option value="High">高</option>
                   <option value="Medium">中</option>

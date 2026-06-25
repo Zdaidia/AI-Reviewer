@@ -294,7 +294,7 @@ function TestModal({ isOpen, onClose, onImport, onGenerate, onRun }) {
                 <select
                   value={testType}
                   onChange={(e) => setTestType(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full"
                 >
                   <option value="basic">Basic Test (Homepage Load, Console Errors)</option>
                   <option value="navigation">Navigation Test (Click Elements)</option>
@@ -482,7 +482,7 @@ function TestModal({ isOpen, onClose, onImport, onGenerate, onRun }) {
                 <select
                   value={browser}
                   onChange={(e) => setBrowser(e.target.value)}
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  className="w-full"
                 >
                   <option value="chromium">Chromium</option>
                   <option value="firefox">Firefox</option>

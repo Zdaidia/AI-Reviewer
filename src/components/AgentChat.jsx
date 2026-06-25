@@ -58,6 +58,31 @@ function AgentChat({
     setIsProcessing(agentStatus?.isProcessing || false);
   }, [agentStatus]);
 
+  // 关闭弹窗时：停止 Agent 处理 + 清空状态
+  const handleClose = () => {
+    if (isProcessing) {
+      handleStop();
+    }
+    setChatMessages([]);
+    setInputValue('');
+    setIsProcessing(false);
+    setThinking('');
+    if (onClose) onClose();
+  };
+
+  // 停止 Agent 处理
+  const handleStop = async () => {
+    try {
+      if (electronAPI?.agentAbort) {
+        await electronAPI.agentAbort();
+      }
+    } catch (e) {
+      console.error('停止 Agent 失败:', e);
+    }
+    setIsProcessing(false);
+    setThinking('');
+  };
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -345,7 +370,7 @@ function AgentChat({
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="text-gray-400 hover:text-white transition-colors"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -476,26 +501,32 @@ function AgentChat({
               type="text"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
-              placeholder="Tell me what to do..."
+              placeholder={isProcessing ? 'Agent 正在处理中...' : 'Tell me what to do...'}
               disabled={isProcessing}
-              className="flex-1 bg-gray-700 text-white rounded-lg px-4 py-2 focus:outline-none focus:ring-2 focus:ring-purple-500 disabled:opacity-50"
+              className="flex-1 disabled:opacity-50"
             />
-            <button
-              type="submit"
-              disabled={isProcessing || !inputValue.trim()}
-              className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg transition-colors"
-            >
-              {isProcessing ? (
-                <svg className="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            {isProcessing ? (
+              <button
+                type="button"
+                onClick={handleStop}
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors flex items-center gap-1"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
-              ) : (
+                停止
+              </button>
+            ) : (
+              <button
+                type="submit"
+                disabled={!inputValue.trim()}
+                className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 disabled:cursor-not-allowed text-white rounded-lg transition-colors"
+              >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
                 </svg>
-              )}
-            </button>
+              </button>
+            )}
           </div>
           {currentPlan && (
             <div className="mt-2 text-xs text-gray-400">

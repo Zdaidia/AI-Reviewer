@@ -193,7 +193,7 @@ const ProblemFilters = ({ filters, onFilterChange, availableSeverities, availabl
           <select
             value={filters.pageSize}
             onChange={(e) => onFilterChange('pageSize', parseInt(e.target.value))}
-            className="px-2 py-1 text-xs bg-gray-700 border border-gray-600 rounded text-gray-300"
+            className="text-xs"
           >
             <option value={20}>20</option>
             <option value={50}>50</option>
@@ -460,7 +460,7 @@ function RightPanel({ activeTab, onTabChange, problems, todos, dependencies, onA
           <select
             value={todoPagination.pageSize}
             onChange={(e) => setTodoPagination({ currentPage: 1, pageSize: parseInt(e.target.value) })}
-            className="px-2 py-1 text-xs bg-gray-700 border border-gray-600 rounded text-gray-300"
+            className="text-xs"
           >
             <option value={20}>20</option>
             <option value={50}>50</option>
@@ -1463,7 +1463,7 @@ function RightPanel({ activeTab, onTabChange, problems, todos, dependencies, onA
                         e.stopPropagation();
                         updateModule(mIdx, 'priority', e.target.value);
                       }}
-                      className="text-xs bg-gray-600 text-white px-2 py-1 rounded"
+                      className="text-xs"
                       onClick={(e) => e.stopPropagation()}
                     >
                       <option value="High">High</option>

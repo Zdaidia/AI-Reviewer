@@ -1671,7 +1671,7 @@ function RuleDetailModal({ rule, onClose, onSave, onDelete }) {
               type="text"
               value={editedRule.name}
               onChange={(e) => setEditedRule({ ...editedRule, name: e.target.value })}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
+              className="w-full text-sm"
             />
           </div>
 
@@ -1681,7 +1681,7 @@ function RuleDetailModal({ rule, onClose, onSave, onDelete }) {
             <select
               value={editedRule.severity}
               onChange={(e) => setEditedRule({ ...editedRule, severity: e.target.value })}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
+              className="w-full text-sm"
             >
               <option value="error">error - 错误</option>
               <option value="warning">warning - 警告</option>
@@ -1696,7 +1696,7 @@ function RuleDetailModal({ rule, onClose, onSave, onDelete }) {
               type="text"
               value={editedRule.languages?.join(', ')}
               onChange={(e) => setEditedRule({ ...editedRule, languages: e.target.value.split(',').map(s => s.trim()) })}
-              className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-white text-sm focus:outline-none focus:border-blue-500"
+              className="w-full text-sm"
               placeholder="javascript, typescript, dart"
             />
           </div>

@@ -229,7 +229,7 @@ function AIAgentTestModal({ isOpen, onClose, electronAPI, projectUrl }) {
           onChange={(e) => setFigmaUrl(e.target.value)}
           placeholder="https://www.figma.com/file/..."
           disabled={isLoading}
-          className="w-full px-4 py-3 bg-gray-900 border border-gray-700 rounded-lg text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-purple-500"
+          className="w-full placeholder-gray-500"
         />
       </div>
 

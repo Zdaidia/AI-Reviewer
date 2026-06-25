@@ -613,32 +613,50 @@
   margin-top: 8px;
 }
 
-.req-analyzer-folder-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin-bottom: 8px;
+.req-analyzer-drive-category {
+  margin-bottom: 4px;
 }
 
-.req-analyzer-folder-item {
-  padding: 4px 10px;
+.req-analyzer-category-header {
+  padding: 8px 12px;
   background: #313244;
   border: 1px solid #45475a;
-  border-radius: 4px;
   cursor: pointer;
-  font-size: 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 4px;
   color: #cdd6f4;
-  transition: all 0.2s;
+  font-weight: 500;
+  transition: background 0.2s;
 }
 
-.req-analyzer-folder-item:hover {
+.req-analyzer-category-header:hover {
   background: #45475a;
 }
 
-.req-analyzer-folder-item.active {
-  border-color: #89b4fa;
+.req-analyzer-tree-node {
+  padding: 6px 12px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 2px;
+  color: #cdd6f4;
+  font-size: 13px;
+  transition: background 0.15s;
+}
+
+.req-analyzer-tree-node:hover {
   background: #45475a;
+}
+
+.req-analyzer-tree-toggle {
+  font-size: 10px;
+  width: 16px;
+  text-align: center;
   color: #89b4fa;
+  flex-shrink: 0;
 }
 
 /* 流式输出 */

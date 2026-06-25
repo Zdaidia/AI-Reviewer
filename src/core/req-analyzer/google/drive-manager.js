@@ -200,13 +200,14 @@ class GoogleDriveManager {
     const client = await this.authManager.getAuthenticatedClient();
     const drive = google.drive({ version: 'v3', auth: client });
 
-    // 获取共享 Drive 的根文件夹 ID
+    // 获取共享 Drive 名称（共享 Drive 的根文件夹 ID 就是 driveId 本身）
     const driveInfo = await drive.drives.get({
       driveId,
-      fields: 'id, name, rootFolderId',
+      fields: 'id, name',
     });
 
-    const rootFolderId = driveInfo.data.rootFolderId;
+    // 共享 Drive 根文件夹 ID = driveId
+    const rootFolderId = driveId;
 
     // 列出根文件夹内容
     const q = `'${rootFolderId}' in parents and trashed=false`;
@@ -494,7 +495,7 @@ class GoogleDriveManager {
       'application/vnd.google-apps.spreadsheet': 'sheet',
       'application/vnd.google-apps.presentation': 'slides',
     };
-    return map[mimeType] || 'unknown';
+    return map[mimeType] || 'download';
   }
 
   /**

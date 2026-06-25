@@ -97,7 +97,7 @@ function AiConfigModal({ isOpen, onClose, onSave, initialConfig }) {
             <select
               value={config.provider}
               onChange={(e) => handleChange('provider', e.target.value)}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full"
             >
               <option value="zhipu">智谱 AI (推荐)</option>
               <option value="claude-code">Claude Code</option>
@@ -147,7 +147,7 @@ function AiConfigModal({ isOpen, onClose, onSave, initialConfig }) {
             <select
               value={config.model}
               onChange={(e) => handleChange('model', e.target.value)}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full"
             >
               <option value="glm-5.1">GLM-5.1 (推荐)</option>
               <option value="glm-5">GLM-5</option>
@@ -190,7 +190,7 @@ function AiConfigModal({ isOpen, onClose, onSave, initialConfig }) {
               step="100"
               value={config.maxTokens}
               onChange={(e) => handleChange('maxTokens', parseInt(e.target.value))}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full"
             />
           </div>
 

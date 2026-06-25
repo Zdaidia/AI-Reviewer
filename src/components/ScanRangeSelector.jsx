@@ -376,7 +376,7 @@ function ScanRangeSelector({
                     value={moduleName}
                     onChange={(e) => setModuleName(e.target.value)}
                     placeholder="输入功能模块名称，如：登录、账号、首页..."
-                    className="flex-1 px-3 py-2 bg-gray-900 border border-gray-600 rounded-lg text-white placeholder-gray-500 focus:border-purple-500 focus:outline-none"
+                    className="flex-1 placeholder-gray-500"
                   />
                   <button
                     onClick={handleSearchModule}

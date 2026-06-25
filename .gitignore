@@ -38,6 +38,15 @@ coverage/
 data/
 .claude/
 
+# Test screenshots
+test-screenshots/
+
+# Old/duplicate components
+AIFixModal/
+
+# Old root-level main.js (entry is src/core/electron/main.js)
+main.js
+
 # Sensitive config
 .dqi-ai-config.json
 .ai-config.json

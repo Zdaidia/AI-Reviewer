@@ -292,7 +292,7 @@ function AdvancedTestModal({ isOpen, onClose, onGenerateTests, onRunTests }) {
                       type="text"
                       value={testConfig.baseUrl}
                       onChange={(e) => setTestConfig({ ...testConfig, baseUrl: e.target.value })}
-                      className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm"
+                      className="w-full text-sm"
                       placeholder="http://localhost:3000"
                     />
                   </div>
@@ -301,7 +301,7 @@ function AdvancedTestModal({ isOpen, onClose, onGenerateTests, onRunTests }) {
                     <select
                       value={testConfig.testType}
                       onChange={(e) => setTestConfig({ ...testConfig, testType: e.target.value })}
-                      className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white text-sm"
+                      className="w-full text-sm"
                     >
                       <option value="basic">基础测试</option>
                       <option value="smoke">冒烟测试</option>
@@ -426,7 +426,7 @@ function AdvancedTestModal({ isOpen, onClose, onGenerateTests, onRunTests }) {
                   value={figmaUrl}
                   onChange={(e) => setFigmaUrl(e.target.value)}
                   placeholder="https://www.figma.com/file/..."
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500"
+                  className="w-full placeholder-gray-500"
                 />
               </div>
 
@@ -439,7 +439,7 @@ function AdvancedTestModal({ isOpen, onClose, onGenerateTests, onRunTests }) {
                   value={figmaToken}
                   onChange={(e) => setFigmaToken(e.target.value)}
                   placeholder="figd_..."
-                  className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded-md text-white placeholder-gray-500"
+                  className="w-full placeholder-gray-500"
                 />
                 <p className="text-xs text-gray-500 mt-1">
                   从 Figma 账户设置中获取个人访问令牌

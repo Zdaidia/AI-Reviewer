@@ -175,18 +175,7 @@
 
 .qa-reviewer-input {
   flex: 1;
-  background: #1a1a1a;
-  border: 1px solid #333;
-  border-radius: 6px;
-  padding: 10px 12px;
-  color: #ddd;
-  font-size: 13px;
   caret-color: #4f9eff;
-}
-
-.qa-reviewer-input:focus {
-  outline: none;
-  border-color: #4f9eff;
 }
 
 /* UI Preview */
@@ -250,17 +239,6 @@
 
 .qa-reviewer-select {
   width: 100%;
-  background: #1a1a1a;
-  border: 1px solid #333;
-  border-radius: 6px;
-  padding: 10px 12px;
-  color: #ddd;
-  font-size: 13px;
-}
-
-.qa-reviewer-select:focus {
-  outline: none;
-  border-color: #4f9eff;
 }
 
 .qa-reviewer-checkbox {

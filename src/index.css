@@ -116,3 +116,51 @@ code {
 .bg-gray-750 {
   background-color: #2d3748;
 }
+
+/* 统一全局 select 下拉框样式 */
+select {
+  padding: 6px 12px;
+  background: #313244;
+  border: 1px solid #585b70;
+  border-radius: 4px;
+  color: #cdd6f4;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+}
+
+select:focus {
+  border-color: #89b4fa;
+}
+
+select option {
+  background: #313244;
+  color: #cdd6f4;
+}
+
+/* 统一全局 input 输入框样式 */
+input[type="text"],
+input[type="password"],
+input[type="url"],
+input[type="number"],
+input[type="email"],
+input[type="search"],
+input:not([type]) {
+  padding: 8px 12px;
+  background: #313244;
+  border: 1px solid #585b70;
+  border-radius: 6px;
+  color: #cdd6f4;
+  font-size: 14px;
+  outline: none;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
+input[type="url"]:focus,
+input[type="number"]:focus,
+input[type="email"]:focus,
+input[type="search"]:focus,
+input:not([type]):focus {
+  border-color: #89b4fa;
+}
