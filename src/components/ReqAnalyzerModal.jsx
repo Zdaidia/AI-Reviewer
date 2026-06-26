@@ -169,9 +169,7 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
   const [parsedSections, setParsedSections] = useState([]);       // 解析出的章节列表
   const [selectedSections, setSelectedSections] = useState(new Set()); // 选中的章节索引
 
-  // Tab 7: 设置
-  const [googleClientSecret, setGoogleClientSecret] = useState('');
-  const [showClientSecret, setShowClientSecret] = useState(false);
+  // Tab 7: 设置（Google OAuth2 密钥已通过 secrets.json 自动内置，无需 UI 配置）
 
   // 内部配置（不直接渲染，但需要保存）
   const [, setConfig] = useState(null);
@@ -284,7 +282,7 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
       const cfg = await electronAPI.reqAnalyzerGetConfig();
       setConfig(cfg);
       if (cfg.google) {
-        setGoogleClientSecret(cfg.google.clientSecret || '');
+        // Google OAuth2 密钥已内置，不从配置加载到 UI
       }
       if (cfg.sheets) {
         setSheetsUrl(cfg.sheets.requirementSheetUrl || '');
@@ -954,7 +952,7 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
     try {
       await electronAPI.reqAnalyzerUpdateConfig({
         google: {
-          clientSecret: googleClientSecret,
+          // 密钥已内置，不再从前端传递
         },
         sheets: {
           requirementSheetUrl: sheetsUrl,
@@ -1867,25 +1865,6 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
           {activeTab === 'settings' && (
             <div className="req-analyzer-settings-tab">
               <h3>设置</h3>
-
-              <div className="req-analyzer-section">
-                <h4>Google OAuth2 配置</h4>
-                <p className="req-analyzer-hint">Client ID 已内置，仅需配置 Client Secret（也可通过 GOOGLE_CLIENT_SECRET 环境变量设置）</p>
-                <div className="req-analyzer-form-group">
-                  <label>Client Secret:</label>
-                  <div className="req-analyzer-token-input">
-                    <ClearableInput
-                      type={showClientSecret ? 'text' : 'password'}
-                      value={googleClientSecret}
-                      onChange={(e) => setGoogleClientSecret(e.target.value)}
-                      placeholder="Google OAuth2 Client Secret..."
-                    />
-                    <button onClick={() => setShowClientSecret(!showClientSecret)} className="req-analyzer-btn-sm">
-                      {showClientSecret ? '🔒' : '👁️'}
-                    </button>
-                  </div>
-                </div>
-              </div>
 
               <div className="req-analyzer-section">
                 <h4>默认 Sheets 地址</h4>
