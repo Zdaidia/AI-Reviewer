@@ -3,10 +3,9 @@
  *
  * 职责：
  * - 记录开发任务和修改
- * - 保存到 D 盘便于查找
  * - 支持任务的增删改查
  *
- * 存储位置：D:/dev-quality-inspector/tasks/
+ * 存储位置：DATA_DIR/tasks/
  */
 
 const fs = require('fs');
@@ -14,7 +13,7 @@ const path = require('path');
 
 class TaskRecordManager {
   constructor(options = {}) {
-    this.baseDir = options.baseDir || 'D:/dev-quality-inspector/tasks';
+    this.baseDir = options.baseDir || path.join(require('../config/data-dir').DATA_DIR, 'tasks');
     this.tasksDir = path.join(this.baseDir, 'tasks');
     this.changelogDir = path.join(this.baseDir, 'changelog');
     this.ensureDirectories();

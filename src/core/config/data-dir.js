@@ -3,9 +3,11 @@
  * 所有模块必须从此处获取 DATA_DIR，禁止本地计算或硬编码
  *
  * 计算规则：
- * - 打包模式：exe 同级 data 目录（portable，跟随应用）
+ * - 打包模式：AppData 用户数据目录（可写，不受 Program Files 权限限制）
  * - 开发模式：项目根目录（package.json 所在）下的 data 目录
  * - 非 Electron 环境：向上查找 package.json 或使用环境变量
+ *
+ * 注意：不能使用 exe 同级目录，因为安装到 Program Files 时普通用户无写入权限
  */
 
 const path = require('path');
@@ -32,8 +34,9 @@ try {
   const { app } = require('electron');
 
   if (app.isPackaged) {
-    // 打包模式：exe 同级 data 目录
-    DATA_DIR = path.join(path.dirname(app.getPath('exe')), 'data');
+    // 打包模式：使用 Electron userData 目录（AppData\Roaming，普通用户可写）
+    // 不能用 exe 同级目录，因为安装到 Program Files 时无写入权限
+    DATA_DIR = app.getPath('userData');
   } else {
     // 开发模式：项目根目录 + '/data'
     const projectRoot = findProjectRoot(__dirname);

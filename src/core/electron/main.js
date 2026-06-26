@@ -373,7 +373,7 @@ function initializeAgent() {
 
     // Initialize task record manager
     taskRecordManager = new TaskRecordManager({
-      baseDir: 'D:/dev-quality-inspector/tasks'
+      baseDir: path.join(DATA_DIR, 'tasks')
     });
     console.log('✓ Task Record Manager initialized');
 

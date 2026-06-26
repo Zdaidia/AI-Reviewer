@@ -170,7 +170,6 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
   const [selectedSections, setSelectedSections] = useState(new Set()); // 选中的章节索引
 
   // Tab 7: 设置
-  const [googleClientId, setGoogleClientId] = useState('');
   const [googleClientSecret, setGoogleClientSecret] = useState('');
   const [showClientSecret, setShowClientSecret] = useState(false);
 
@@ -285,7 +284,6 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
       const cfg = await electronAPI.reqAnalyzerGetConfig();
       setConfig(cfg);
       if (cfg.google) {
-        setGoogleClientId(cfg.google.clientId || '');
         setGoogleClientSecret(cfg.google.clientSecret || '');
       }
       if (cfg.sheets) {
@@ -956,7 +954,6 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
     try {
       await electronAPI.reqAnalyzerUpdateConfig({
         google: {
-          clientId: googleClientId,
           clientSecret: googleClientSecret,
         },
         sheets: {
@@ -1873,14 +1870,7 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
 
               <div className="req-analyzer-section">
                 <h4>Google OAuth2 配置</h4>
-                <div className="req-analyzer-form-group">
-                  <label>Client ID:</label>
-                  <ClearableInput
-                    value={googleClientId}
-                    onChange={(e) => setGoogleClientId(e.target.value)}
-                    placeholder="Google OAuth2 Client ID..."
-                  />
-                </div>
+                <p className="req-analyzer-hint">Client ID 已内置，仅需配置 Client Secret（也可通过 GOOGLE_CLIENT_SECRET 环境变量设置）</p>
                 <div className="req-analyzer-form-group">
                   <label>Client Secret:</label>
                   <div className="req-analyzer-token-input">

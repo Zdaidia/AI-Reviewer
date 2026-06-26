@@ -17,8 +17,10 @@ const http = require('http');
 
 class GoogleOAuth2Manager {
   constructor(config = {}) {
-    this.clientId = config.clientId || '';
-    this.clientSecret = config.clientSecret || '';
+    // Client ID 可公开，硬编码在源码中
+    this.clientId = '602232104560-2dlg51k0l5dmmk4f21qm7u019gugsegs.apps.googleusercontent.com';
+    // Client Secret 必须保密，优先从配置参数读取（配置文件），次从环境变量读取（开发模式），不硬编码
+    this.clientSecret = config.clientSecret || process.env.GOOGLE_CLIENT_SECRET || '';
     this.redirectUri = config.redirectUri || 'dqi://auth/callback';
 
     // 回退方案：本地 loopback 服务器（子进程）
@@ -62,8 +64,11 @@ class GoogleOAuth2Manager {
    * 初始化 OAuth2 客户端
    */
   _initClient() {
-    if (!this.clientId || !this.clientSecret) {
-      throw new Error('Google OAuth2 clientId 和 clientSecret 未配置。请在设置中填写。');
+    if (!this.clientId) {
+      throw new Error('Google OAuth2 Client ID 缺失。');
+    }
+    if (!this.clientSecret) {
+      throw new Error('Google OAuth2 Client Secret 未配置。请在设置中填写或设置 GOOGLE_CLIENT_SECRET 环境变量。');
     }
 
     this.oAuth2Client = new OAuth2Client(
@@ -101,24 +106,30 @@ class GoogleOAuth2Manager {
       this._authCodeResolve = resolve;
       this._authCodeReject = reject;
 
-      // 2分钟超时（浏览器登录失败如 403 时不会回调）
+      // 5分钟超时（给用户充足时间完成登录）
       authTimeoutId = setTimeout(() => {
-        console.warn('[GoogleOAuth2] 认证超时，浏览器可能未完成授权');
+        console.warn('[GoogleOAuth2] 认证超时，浏览器可能已关闭或未完成授权');
         this._cleanupLoopback();
         if (this._authCodeReject) {
-          this._authCodeReject(new Error('OAuth2 认证超时（2分钟）。浏览器可能未完成授权，请检查是否有权限错误后重试。'));
+          this._authCodeReject(new Error('认证超时。浏览器可能已关闭，请重试。'));
           this._authCodeResolve = null;
           this._authCodeReject = null;
         }
-      }, 2 * 60 * 1000);
+      }, 5 * 60 * 1000);
     }).finally(() => {
       clearTimeout(authTimeoutId);
     });
 
-    // 3. 在独立子进程中启动 loopback 服务器（避免在主进程创建 HTTP server 导致 network service 崩溃）
+    // 3. 在独立子进程中启动 loopback 服务器
     try {
       const { fork } = require('child_process');
-      const loopbackModulePath = path.join(__dirname, 'loopback-worker.js');
+      let loopbackModulePath = path.join(__dirname, 'loopback-worker.js');
+
+      // 打包后 asar 内路径无法被 fork 执行，需转换为 unpacked 路径
+      if (loopbackModulePath.includes('.asar')) {
+        loopbackModulePath = loopbackModulePath.replace('.asar', '.asar.unpacked');
+        console.log(`[GoogleOAuth2] asar→unpacked 路径转换: ${loopbackModulePath}`);
+      }
 
       // 启动子进程等待端口
       this._loopbackWorker = fork(loopbackModulePath, [], { silent: false });
@@ -143,14 +154,30 @@ class GoogleOAuth2Manager {
         });
       });
 
-      // 监听子进程传回的 auth code
+      // 监听子进程传回的 auth code 或错误
       this._loopbackWorker.on('message', (msg) => {
         if (msg.type === 'code' && this._authCodeResolve) {
           this._authCodeResolve(msg.code);
           this._authCodeResolve = null;
           this._authCodeReject = null;
+          // 认证成功后自动聚焦应用窗口
+          if (mainWindow) {
+            mainWindow.show();
+            mainWindow.focus();
+          }
         } else if (msg.type === 'auth_error' && this._authCodeReject) {
-          this._authCodeReject(new Error(`Google 认证错误: ${msg.error}`));
+          this._authCodeReject(new Error(msg.error));
+          this._authCodeResolve = null;
+          this._authCodeReject = null;
+        }
+      });
+
+      // 监听子进程退出（用户关闭浏览器导致 loopback server 停止）
+      this._loopbackWorker.on('exit', (code) => {
+        console.log(`[GoogleOAuth2] loopback 子进程退出，code: ${code}`);
+        // 如果还没收到 auth code，说明用户可能关闭了浏览器
+        if (this._authCodeReject) {
+          this._authCodeReject(new Error('认证被取消。浏览器已关闭或认证未完成。'));
           this._authCodeResolve = null;
           this._authCodeReject = null;
         }
@@ -192,6 +219,12 @@ class GoogleOAuth2Manager {
       this.isAuthenticated = true;
       await this._extractUserEmail();
 
+      // 8. 认证成功后自动聚焦应用窗口
+      if (mainWindow) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+
       console.log('[GoogleOAuth2] 认证成功');
       return {
         success: true,
@@ -217,15 +250,20 @@ class GoogleOAuth2Manager {
   /**
    * 处理 OAuth2 回调（自定义协议方式）
    * 由 main.js 的 second-instance / open-url 事件触发
+   *
+   * 支持的协议回调：
+   * - dqi://auth/callback?code=xxx → 正常 OAuth2 回调（带回 code，作为 loopback 失败时的回退方案）
    */
   handleAuthCallback(url) {
-    if (!this._authCodeResolve) {
-      console.warn('[GoogleOAuth2] 收到回调但没有等待中的认证请求');
-      return;
-    }
-
     try {
       const parsedUrl = new URL(url);
+
+      // 正常 OAuth2 回调（带 code/error 参数）
+      if (!this._authCodeResolve) {
+        console.warn('[GoogleOAuth2] 收到回调但没有等待中的认证请求');
+        return;
+      }
+
       const code = parsedUrl.searchParams.get('code');
       const error = parsedUrl.searchParams.get('error');
 
@@ -237,7 +275,9 @@ class GoogleOAuth2Manager {
         this._authCodeReject(new Error('回调 URL 中没有 code 参数'));
       }
     } catch (e) {
-      this._authCodeReject(new Error(`解析回调 URL 失败: ${e.message}`));
+      if (this._authCodeReject) {
+        this._authCodeReject(new Error(`解析回调 URL 失败: ${e.message}`));
+      }
     }
 
     this._authCodeResolve = null;
@@ -354,7 +394,7 @@ class GoogleOAuth2Manager {
       hasRefreshToken: !!this.tokens?.refresh_token,
       tokenExpiry: this.tokens?.expiry_date || null,
       clientId: this.clientId ? '已配置' : '未配置',
-      clientSecret: this.clientSecret ? '已配置' : '未配置',
+      clientSecret: this.clientSecret ? '已配置' : '未配置（请在设置中填写）',
     };
   }
 
@@ -384,20 +424,17 @@ class GoogleOAuth2Manager {
   }
 
   /**
-   * 更新配置（clientId / clientSecret）
-   * 保留已认证状态，只在凭证真正变化时才重新初始化客户端
+   * 更新配置（clientId 不可更改，clientSecret/redirectUri 可通过设置面板更新）
    */
   updateConfig(config) {
-    const clientIdChanged = config.clientId && config.clientId !== this.clientId;
     const clientSecretChanged = config.clientSecret && config.clientSecret !== this.clientSecret;
     const redirectUriChanged = config.redirectUri && config.redirectUri !== this.redirectUri;
 
-    if (config.clientId) this.clientId = config.clientId;
     if (config.clientSecret) this.clientSecret = config.clientSecret;
     if (config.redirectUri) this.redirectUri = config.redirectUri;
 
-    // 只有凭证真正变化时才重新初始化客户端
-    if (clientIdChanged || clientSecretChanged || redirectUriChanged) {
+    // 凭证变化时重新初始化客户端
+    if (clientSecretChanged || redirectUriChanged) {
       this.oAuth2Client = null;
       this._initClient();
     }

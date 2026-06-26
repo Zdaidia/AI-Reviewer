@@ -2347,7 +2347,13 @@ ${(segment.metadata && segment.metadata.i18nFiles && segment.metadata.i18nFiles.
     const path = require('path');
     const { name, arguments: argsString } = toolCall.function;
     // OpenAI API 返回的 arguments 是 JSON 字符串，需要解析
-    const args = typeof argsString === 'string' ? JSON.parse(argsString) : argsString;
+    let args;
+    try {
+      args = typeof argsString === 'string' ? JSON.parse(argsString) : argsString;
+    } catch (parseErr) {
+      console.warn('[SegmentExecutor] 工具调用 arguments 解析失败:', parseErr.message, '原始内容:', argsString?.substring(0, 200));
+      args = {};
+    }
 
     console.log(`[SegmentExecutor] 执行工具: ${name}`, args);
 
@@ -4407,14 +4413,18 @@ ${reviewTasks.securityChecking ? `✅ **4. 安全检查**
    - **输入安全**：XSS 防护、输入过滤、注入防护
    - **数据安全**：敏感信息脱敏、密钥硬编码检查、本地存储安全
    - **认证授权**：权限校验、Token/Session 管理、CSRF 防护` : ''}
-${reviewTasks.accessibility ? '✅ **5. 无障碍性（accessibility）**
-	   - 无障碍标签与语义化、键盘导航、颜色对比度' : ''}
-${reviewTasks.compatibility ? '✅ **6. 兼容性（compatibility）**
-	   - 浏览器兼容、响应式适配、国际化支持' : ''}
-${reviewTasks.performance ? '✅ **7. 性能（performance）**
-	   - 渲染优化、资源管理（内存/定时器/Controller dispose）、网络优化' : ''}
-${reviewTasks.maintainability ? '✅ **8. 可维护性（maintainability）**
-	   - 代码结构（组件拆分、重复代码、命名规范）、命名拼写检查（如 handel→handle，必须报告）、错误处理、可读性' : ''}
+${reviewTasks.accessibility ? `✅ **5. 无障碍性（accessibility）**
+	   - 无障碍标签与语义化、键盘导航、颜色对比度` : ''}
+
+${reviewTasks.compatibility ? `✅ **6. 兼容性（compatibility）**
+	   - 浏览器兼容、响应式适配、国际化支持` : ''}
+
+${reviewTasks.performance ? `✅ **7. 性能（performance）**
+	   - 渲染优化、资源管理（内存/定时器/Controller dispose）、网络优化` : ''}
+
+${reviewTasks.maintainability ? `✅ **8. 可维护性（maintainability）**
+	   - 代码结构（组件拆分、重复代码、命名规范）、命名拼写检查（如 handel→handle，必须报告）、错误处理、可读性` : ''}
+
 
 ⚠️ **重要**：只检查上述勾选（✅）的维度，未勾选的维度不需要检查！
 

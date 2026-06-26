@@ -20,7 +20,6 @@
       "build/**/*",
       "src/**/*",
       "rules.yaml",
-      "rules-fix.yaml",
       "agent-config.yaml",
       "assets/**/*",
       "node_modules/**/*",
@@ -39,8 +38,8 @@
       "src/core/scanner/scan-worker.js",
       "src/core/scanner/parallel-scanner.js",
       "src/core/scanner/index.js",
+      "src/core/req-analyzer/google/loopback-worker.js",
       "rules.yaml",
-      "rules-fix.yaml",
       "agent-config.yaml"
     ],
     "npmRebuild": false,
@@ -95,6 +94,7 @@
   "devDependencies": {
     "concurrently": "^9.2.1",
     "electron": "^28.3.3",
+    "electron-builder": "^24.13.3",
     "eslint-config-react-app": "^7.0.1",
     "react-scripts": "^5.0.1",
     "wait-on": "^9.0.10"

@@ -169,7 +169,9 @@ class ReqAnalyzerConfig {
   getDefaultConfig() {
     return {
       google: {
-        clientId: process.env.GOOGLE_CLIENT_ID || '',
+        // Client ID 可公开，硬编码在源码中
+        clientId: '602232104560-2dlg51k0l5dmmk4f21qm7u019gugsegs.apps.googleusercontent.com',
+        // Client Secret 必须保密，从配置文件或环境变量读取（不硬编码在源码中）
         clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
         redirectUri: 'dqi://auth/callback',
       },
