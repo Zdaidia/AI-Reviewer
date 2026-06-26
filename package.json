@@ -42,6 +42,12 @@
       "rules.yaml",
       "agent-config.yaml"
     ],
+    "extraResources": [
+      {
+        "from": "secrets.json",
+        "to": "secrets.json"
+      }
+    ],
     "npmRebuild": false,
     "win": {
       "target": "nsis",

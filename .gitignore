@@ -50,6 +50,7 @@ main.js
 # Sensitive config
 .dqi-ai-config.json
 .ai-config.json
+secrets.json
 
 # Test files
 test-*.js

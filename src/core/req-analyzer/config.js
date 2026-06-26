@@ -20,6 +20,7 @@
  */
 
 const { DATA_DIR } = require('../config/data-dir');
+const { getGoogleClientSecret, getFigmaAccessToken } = require('../config/secrets-loader');
 const path = require('path');
 const fs = require('fs');
 
@@ -171,8 +172,8 @@ class ReqAnalyzerConfig {
       google: {
         // Client ID 可公开，硬编码在源码中
         clientId: '602232104560-2dlg51k0l5dmmk4f21qm7u019gugsegs.apps.googleusercontent.com',
-        // Client Secret 必须保密，从配置文件或环境变量读取（不硬编码在源码中）
-        clientSecret: process.env.GOOGLE_CLIENT_SECRET || '',
+        // Client Secret 必须保密，优先从 secrets.json（打包自带）读取
+        clientSecret: getGoogleClientSecret(),
         redirectUri: 'dqi://auth/callback',
       },
       sheets: {
@@ -193,7 +194,7 @@ class ReqAnalyzerConfig {
         },
       },
       figma: {
-        accessToken: process.env.FIGMA_ACCESS_TOKEN || '',
+        accessToken: getFigmaAccessToken(),
         defaultUrl: 'https://www.figma.com/design/iE6V1a7Bzfl2zHI2LuKIQY/%E5%8F%B0%E5%8D%97%E5%81%8C%E8%BB%8A%E7%87%9F%E9%81%8B%E7%AE%A1%E7%90%86%E7%B3%BB%E7%B5%B1?node-id=28959-188&p=f&t=o2OTzZ0makHYkZWf-0',
       },
       output: {

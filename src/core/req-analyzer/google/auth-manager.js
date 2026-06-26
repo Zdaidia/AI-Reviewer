@@ -14,13 +14,14 @@ const { shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const http = require('http');
+const { getGoogleClientSecret } = require('../../config/secrets-loader');
 
 class GoogleOAuth2Manager {
   constructor(config = {}) {
     // Client ID 可公开，硬编码在源码中
     this.clientId = '602232104560-2dlg51k0l5dmmk4f21qm7u019gugsegs.apps.googleusercontent.com';
-    // Client Secret 必须保密，优先从配置参数读取（配置文件），次从环境变量读取（开发模式），不硬编码
-    this.clientSecret = config.clientSecret || process.env.GOOGLE_CLIENT_SECRET || '';
+    // Client Secret 必须保密，优先从 secrets.json（打包自带）读取，回退到配置参数和环境变量
+    this.clientSecret = getGoogleClientSecret(config.clientSecret);
     this.redirectUri = config.redirectUri || 'dqi://auth/callback';
 
     // 回退方案：本地 loopback 服务器（子进程）
