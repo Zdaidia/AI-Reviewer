@@ -339,7 +339,36 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
         });
         showToast('Google 登录成功', 'success');
       } else {
-        showToast(`Google 登录失败: ${result.error}`, 'error');
+        // 如果是权限不完整的错误，给出明确提示并引导重新授权
+        if (result.missingScopes && result.missingScopes.length > 0) {
+          const missingNames = result.missingScopes.map(s => {
+            if (s.includes('spreadsheets') && !s.includes('readonly')) return '查看和编辑 Google Sheets（写入权限）';
+            if (s.includes('spreadsheets.readonly')) return '查看 Google Sheets（只读权限）';
+            if (s.includes('drive.readonly')) return '查看 Google Drive 文件';
+            if (s.includes('drive') && !s.includes('readonly')) return '查看和编辑 Google Drive 文件';
+            if (s === 'openid' || s === 'email') return '查看您的邮箱地址';
+            return s;
+          });
+          const userConfirmed = window.confirm(
+            `⚠️ 授权权限不完整！\n\n` +
+            `您在 Google 授权页面未授予以下权限：\n` +
+            `• ${missingNames.join('\n• ')}\n\n` +
+            `缺少这些权限将无法写入 Google Sheets。\n\n` +
+            `请点击"确定"重新登录，在 Google 授权页面中：\n` +
+            `1. 看到权限提示时，点击"Continue"继续\n` +
+            `2. 在权限选择界面，勾选/确认所有权限\n` +
+            `3. 特别注意"Edit your Google Sheets"权限必须确认\n\n` +
+            `点击"取消"则保持当前状态（部分功能不可用）`
+          );
+          if (userConfirmed) {
+            // 用户确认重新授权，自动触发
+            setIsAuthLoading(false);
+            await handleGoogleAuth();
+            return;
+          }
+        } else {
+          showToast(`Google 登录失败: ${result.error}`, 'error');
+        }
       }
     } catch (e) {
       if (sessionRef.current !== session) return;
@@ -1219,6 +1248,9 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
               <h3>Google 账号登录</h3>
               <p className="req-analyzer-desc">登录 Google 账号后可访问 Google Sheets 和 Drive 文件</p>
               <p className="req-analyzer-permissions">需要权限：Sheets 读写 + Drive 只读</p>
+              <div className="req-analyzer-auth-tip">
+                <p>⚠️ <strong>重要提示</strong>：Google授权页面默认未勾选全部权限，请在授权时<strong>勾选所有权限选项</strong>（特别是"查看和编辑您的 Google Sheets"），否则无法写入 Sheets。</p>
+              </div>
 
               {googleAuthStatus.isAuthenticated ? (
                 <div className="req-analyzer-auth-success">

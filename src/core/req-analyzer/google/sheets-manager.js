@@ -97,6 +97,21 @@ class GoogleSheetsManager {
       };
     } catch (error) {
       console.error(`[SheetsManager] 读取 Sheet 失败: ${error.message}`);
+
+      // 检测 scope 不足错误
+      if (error.message && error.message.includes('insufficient authentication scopes')) {
+        console.warn('[SheetsManager] 读取时检测到 scope 不足，清除 token');
+        try { await this.authManager.revokeAuth(); } catch (e) { /* ignore */ }
+        return {
+          success: false,
+          error: 'Google 认证权限不足。请重新登录 Google 账号，确保授权时允许"查看您的 Google Sheets"权限。',
+        };
+      }
+
+      if (error.code === 404) {
+        return { success: false, error: '找不到指定的 Google Sheets，请检查 URL 是否正确。' };
+      }
+
       return {
         success: false,
         error: error.message,
@@ -254,17 +269,18 @@ class GoogleSheetsManager {
    *   - append: 是否追加模式（默认 false，创建新 tab）
    */
   async writeSheet(sheetsUrl, questionList, options = {}) {
-    const client = await this.authManager.getAuthenticatedClient();
-    const sheets = google.sheets({ version: 'v4', auth: client });
+    try {
+      const client = await this.authManager.getAuthenticatedClient();
+      const sheets = google.sheets({ version: 'v4', auth: client });
 
-    const { spreadsheetId } = this.parseSheetsUrl(sheetsUrl);
-    const sheetName = options.sheetName || `${options.moduleName || '未命名'}-规格问题`;
+      const { spreadsheetId } = this.parseSheetsUrl(sheetsUrl);
+      const sheetName = options.sheetName || `${options.moduleName || '未命名'}-规格问题`;
 
-    // 1. 检查是否需要创建新 Sheet tab
-    const metadata = await sheets.spreadsheets.get({ spreadsheetId });
-    const existingSheet = metadata.data.sheets.find(
-      s => s.properties.title === sheetName
-    );
+      // 1. 检查是否需要创建新 Sheet tab
+      const metadata = await sheets.spreadsheets.get({ spreadsheetId });
+      const existingSheet = metadata.data.sheets.find(
+        s => s.properties.title === sheetName
+      );
 
     if (!existingSheet) {
       // 创建新 tab
@@ -337,6 +353,31 @@ class GoogleSheetsManager {
       sheetName,
       rowsWritten: questionList.length,
     };
+    } catch (error) {
+      console.error(`[SheetsManager] 写入失败: ${error.message}`);
+
+      // 检测 scope 不足错误，自动清除 token 强制重新授权
+      if (error.message && error.message.includes('insufficient authentication scopes')) {
+        console.warn('[SheetsManager] 检测到 scope 不足错误，将清除 token 并提示重新登录');
+        try {
+          await this.authManager.revokeAuth();
+        } catch (revokeErr) {
+          // 撤销失败也继续，至少清除本地 token
+          console.warn(`[SheetsManager] 撤销认证失败: ${revokeErr.message}`);
+        }
+        throw new Error('Google 认证权限不足（缺少 Sheets 写入权限）。请重新登录 Google 账号，授权时请允许"查看和编辑您的 Google Sheets"权限。');
+      }
+
+      // 其他 Google API 错误，提供更友好的提示
+      if (error.code === 403) {
+        throw new Error(`Google Sheets 访问被拒绝: ${error.message}。请检查您是否有该 Sheet 的编辑权限。`);
+      }
+      if (error.code === 404) {
+        throw new Error(`找不到指定的 Google Sheets，请检查 URL 是否正确。`);
+      }
+
+      throw error;
+    }
   }
 
   /**

@@ -28,12 +28,20 @@ class GoogleOAuth2Manager {
     this.loopbackPort = null;
     this._loopbackWorker = null;
 
-    // OAuth2 scopes
+    // OAuth2 scopes（全部scope用于认证URL请求）
     this.scopes = [
       'https://www.googleapis.com/auth/spreadsheets',
       'https://www.googleapis.com/auth/drive.readonly',
       'openid',
       'email',
+    ];
+
+    // API scopes（只用于验证token是否拥有足够权限）
+    // openid/email 是 OpenID Connect 身份scope，Google 不一定在 token.scope 中返回它们，
+    // 但它们通过 ID token 自动处理，不需要在 scope 字段中显式列出
+    this.apiScopes = [
+      'https://www.googleapis.com/auth/spreadsheets',
+      'https://www.googleapis.com/auth/drive.readonly',
     ];
 
     // Token 存储
@@ -213,14 +221,34 @@ class GoogleOAuth2Manager {
       this.tokens = tokens;
       this.oAuth2Client.setCredentials(tokens);
 
-      // 6. 保存 tokens
+      // 6. 检查 API scope 是否完整（只检查 API 权限，不检查身份 scope openid/email）
+      if (tokens.scope) {
+        const grantedScopes = tokens.scope.split(' ').filter(s => s);
+        const missingScopes = this.apiScopes.filter(required => !grantedScopes.includes(required));
+        if (missingScopes.length > 0) {
+          console.error(`[GoogleOAuth2] 授权权限不完整！缺少: ${missingScopes.join(', ')}`);
+          // 清除不完整的 token，要求重新授权
+          this.tokens = null;
+          this.isAuthenticated = false;
+          if (fs.existsSync(this.tokenPath)) {
+            fs.unlinkSync(this.tokenPath);
+          }
+          return {
+            success: false,
+            error: '授权权限不完整。Google授权页面默认未勾选全部权限，请重新登录并在授权页面中勾选所有权限选项（特别是"查看和编辑您的 Google Sheets"），否则无法写入 Sheets。',
+            missingScopes,
+          };
+        }
+      }
+
+      // 7. 保存 tokens
       this.saveTokens();
 
-      // 7. 提取用户信息
+      // 8. 提取用户信息
       this.isAuthenticated = true;
       await this._extractUserEmail();
 
-      // 8. 认证成功后自动聚焦应用窗口
+      // 9. 认证成功后自动聚焦应用窗口
       if (mainWindow) {
         mainWindow.show();
         mainWindow.focus();
@@ -370,7 +398,20 @@ class GoogleOAuth2Manager {
     if (this.tokens.expiry_date && Date.now() >= this.tokens.expiry_date) {
       console.log('[GoogleOAuth2] Token 已过期，正在刷新...');
       try {
+        // 保留原始 scope 信息（Google refresh response 不返回 scope 字段）
+        const originalScope = this.tokens.scope;
+        const originalTokenType = this.tokens.token_type;
+
         const { credentials } = await this.oAuth2Client.refreshAccessToken();
+
+        // 保留原始 scope，防止刷新后丢失
+        if (originalScope && !credentials.scope) {
+          credentials.scope = originalScope;
+        }
+        if (originalTokenType && !credentials.token_type) {
+          credentials.token_type = originalTokenType;
+        }
+
         this.tokens = credentials;
         this.oAuth2Client.setCredentials(credentials);
         this.saveTokens();
@@ -487,12 +528,99 @@ class GoogleOAuth2Manager {
       console.log('[GoogleOAuth2] Tokens 已从文件加载');
       // 有 refresh_token 就视为已认证
       if (this.tokens?.refresh_token) {
+        // 检查 token 的 scope 是否满足需求
+        if (!this._validateTokenScopes()) {
+          console.warn('[GoogleOAuth2] Token 的 scope 不满足当前需求，需要重新认证');
+          this.tokens = null;
+          this.isAuthenticated = false;
+          // 删除旧的 token 文件，强制用户重新登录
+          if (fs.existsSync(this.tokenPath)) {
+            fs.unlinkSync(this.tokenPath);
+            console.log('[GoogleOAuth2] 已删除旧的 token 文件');
+          }
+          return;
+        }
+
         this.isAuthenticated = true;
+        // 异步获取用户邮箱（不阻塞加载）
+        this._extractUserEmail().catch(e => {
+          console.warn(`[GoogleOAuth2] 加载时获取用户信息失败: ${e.message}`);
+        });
       }
     } catch (e) {
       console.warn(`[GoogleOAuth2] 加载 tokens 失败: ${e.message}`);
       this.tokens = null;
     }
+  }
+
+  /**
+   * 验证 token 的 scope 是否满足需求
+   * 使用灵活匹配：宽 scope 自动覆盖窄 scope
+   * 例如：spreadsheets 覆盖 spreadsheets.readonly
+   * @returns {boolean} 是否满足
+   */
+  _validateTokenScopes() {
+    // token 响应中的 scope 字段是用空格分隔的 scope URL 字符串
+    const tokenScopes = this.tokens?.scope || '';
+    const tokenScopeList = tokenScopes.split(' ').filter(s => s);
+
+    // 没有 scope 字段但有 refresh_token 时，视为可能满足（无法验证）
+    // 需要在实际 API 调用时才能确认 scope 是否足够
+    if (tokenScopeList.length === 0 && this.tokens?.refresh_token) {
+      console.warn('[GoogleOAuth2] Token 文件中没有 scope 字段，将尝试使用（实际验证依赖 Google API）');
+      return true;
+    }
+
+    // 定义 scope 覆盖关系：宽 scope 可以覆盖窄 scope
+    // 例如：请求 spreadsheets 时，如果 token 有 spreadsheets 或 spreadsheets.readonly 都不够
+    // 只有 spreadsheets 才能满足 spreadsheets 的写入需求
+    const scopeCoverage = {
+      'https://www.googleapis.com/auth/spreadsheets': [
+        'https://www.googleapis.com/auth/spreadsheets.readonly',
+      ],
+      'https://www.googleapis.com/auth/drive': [
+        'https://www.googleapis.com/auth/drive.readonly',
+        'https://www.googleapis.com/auth/drive.file',
+      ],
+    };
+
+    // 检查每个必需 API scope 是否被 token 的 scope 覆盖
+    // 注意：只验证 apiScopes（spreadsheets, drive.readonly），不验证身份scope（openid, email）
+    // 因为 openid/email 是 OpenID Connect scope，Google 不一定在 token.scope 字段中返回它们
+    const missingScopes = this.apiScopes.filter(requiredScope => {
+      // token 中是否有精确匹配
+      if (tokenScopeList.includes(requiredScope)) {
+        return false; // 精确匹配，满足
+      }
+      // token 中是否有覆盖此 scope 的更宽 scope
+      // 例如：如果需要 spreadsheets.readonly，token 有 spreadsheets 就够
+      for (const [wideScope, narrowScopes] of Object.entries(scopeCoverage)) {
+        if (narrowScopes.includes(requiredScope) && tokenScopeList.includes(wideScope)) {
+          return false; // 宽 scope 覆盖了需要的窄 scope
+        }
+      }
+      // 反向检查：如果需要的是宽 scope（如 spreadsheets），但 token 只有窄 scope（如 spreadsheets.readonly）
+      // 这是不满足的——readonly 不能覆盖写入权限
+      for (const [wideScope, narrowScopes] of Object.entries(scopeCoverage)) {
+        if (requiredScope === wideScope) {
+          const hasOnlyNarrow = narrowScopes.some(ns => tokenScopeList.includes(ns));
+          if (hasOnlyNarrow) {
+            console.warn(`[GoogleOAuth2] 需要宽 scope "${requiredScope}"（写入权限），但 token 只有窄 scope（只读权限），需要重新授权`);
+            return true; // 确实缺失
+          }
+        }
+      }
+      return true; // 缺失
+    });
+
+    if (missingScopes.length > 0) {
+      console.warn(`[GoogleOAuth2] Token 缺少以下 scope: ${missingScopes.join(', ')}`);
+      console.warn(`[GoogleOAuth2] Token 已有的 scope: ${tokenScopes}`);
+      return false;
+    }
+
+    console.log('[GoogleOAuth2] Token scope 验证通过');
+    return true;
   }
 }
 

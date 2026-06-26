@@ -819,3 +819,112 @@
   color: #9ca3af;
   margin-top: 4px;
 }
+
+/* 审查范围选择器 */
+.qa-reviewer-scope-selector {
+  margin-bottom: 20px;
+}
+
+.qa-reviewer-scope-label {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: #aaa;
+  margin-bottom: 12px;
+}
+
+.qa-reviewer-scope-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.qa-reviewer-scope-card {
+  width: 100%;
+  text-align: left;
+  padding: 0;
+  border-radius: 8px;
+  border: 2px solid #444;
+  background: #252525;
+  cursor: pointer;
+  transition: all 0.2s;
+  color: inherit;
+}
+
+.qa-reviewer-scope-card:hover {
+  background: #333;
+  border-color: #555;
+}
+
+.qa-reviewer-scope-card.active {
+  border-color: #4f9eff;
+  background: rgba(79, 158, 255, 0.1);
+}
+
+.qa-reviewer-scope-card-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.qa-reviewer-scope-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+}
+
+.qa-reviewer-scope-text {
+  flex: 1;
+}
+
+.qa-reviewer-scope-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: #ddd;
+}
+
+.qa-reviewer-scope-desc {
+  font-size: 12px;
+  color: #888;
+  margin-top: 2px;
+}
+
+.qa-reviewer-scope-check {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #4f9eff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.qa-reviewer-scope-check-icon {
+  width: 12px;
+  height: 12px;
+  color: #fff;
+}
+
+.qa-reviewer-scope-content {
+  margin-top: 16px;
+}
+
+.qa-reviewer-entire-project-info {
+  background: #252525;
+  border-radius: 8px;
+  padding: 24px 20px;
+  text-align: center;
+  color: #888;
+  font-size: 14px;
+}
+
+.qa-reviewer-file-type-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(79, 158, 255, 0.15);
+  color: #4f9eff;
+  margin-left: 6px;
+}

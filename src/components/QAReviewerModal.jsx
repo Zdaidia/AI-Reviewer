@@ -64,7 +64,8 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
   const [parallelSegments, setParallelSegments] = useState(2);
   const [maxFilesPerSegment, setMaxFilesPerSegment] = useState(10);
   const [incrementalMode, setIncrementalMode] = useState(false);
-  const [reviewEntireProject, setReviewEntireProject] = useState(false); // 审查整个项目
+  const [fileSelectionMode, setFileSelectionMode] = useState('pageMatch'); // 'entireProject' | 'pageMatch' | 'manualSelect'
+  const [isSearchingPage, setIsSearchingPage] = useState(false); // 页面匹配专用加载状态
 
   // 分段预览
   const [segments, setSegments] = useState([]);
@@ -111,6 +112,8 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
     setSegments([]);
     setPlanSummary(null);
     setExecutionProgress(null);
+    setFileSelectionMode('pageMatch');
+    setIsSearchingPage(false);
     // 保持 dimensions 和其他设置不变
   };
 
@@ -234,8 +237,9 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
 
     console.log('[QA Reviewer Frontend] 识别的模块:', moduleNames);
 
-    // 切换到文件选择标签
+    // 切换到文件选择标签，设置为手动选择模式
     if (relatedFiles.length > 0) {
+      setFileSelectionMode('manualSelect');
       setActiveTab('files');
     }
   };
@@ -302,7 +306,8 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
     // 直接使用后端返回的文件列表，不再添加全局配置文件
     setSelectedFiles(relatedFiles);
 
-    // 切换到文件选择标签
+    // 切换到文件选择标签，设置为手动选择模式
+    setFileSelectionMode('manualSelect');
     setActiveTab('files');
   };
 
@@ -394,6 +399,45 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
   };
 
   /**
+   * 文件选择模式切换
+   */
+  const handleScopeChange = (newMode) => {
+    setFileSelectionMode(newMode);
+
+    if (newMode === 'entireProject') {
+      // 切换到整个项目时清空已选文件（不需要文件）
+      setSelectedFiles([]);
+      setMatchedPageFiles([]);
+    } else if (newMode === 'pageMatch') {
+      // 切换到页面匹配时，如果有匹配结果则保留
+      if (matchedPageFiles.length > 0) {
+        setSelectedFiles(matchedPageFiles);
+      } else {
+        setSelectedFiles([]);
+      }
+    } else if (newMode === 'manualSelect') {
+      // 切换到手动选择时清空匹配结果，保留手动选择的文件
+      setMatchedPageFiles([]);
+    }
+  };
+
+  /**
+   * 下一步按钮是否禁用
+   */
+  const isNextButtonDisabled = () => {
+    if (fileSelectionMode === 'entireProject') {
+      return false; // 整个项目模式始终允许继续
+    }
+    if (fileSelectionMode === 'pageMatch') {
+      return matchedPageFiles.length === 0; // 页面匹配模式需要至少有匹配结果
+    }
+    if (fileSelectionMode === 'manualSelect') {
+      return selectedFiles.length === 0; // 手动选择需要至少有选中文件
+    }
+    return true;
+  };
+
+  /**
    * 通过页面名称匹配文件（使用多语言包）
    */
   const handleSearchByPageName = async () => {
@@ -402,7 +446,7 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
       return;
     }
 
-    setIsLoading(true);
+    setIsSearchingPage(true);
     try {
       console.log('[QA Reviewer] 根据页面名称搜索文件:', pageNameInput);
 
@@ -419,17 +463,16 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
         setMatchedPageFiles(result.files);
         setSelectedFiles(result.files);
 
-        // 跳转到文件选择tab
-        setActiveTab('files');
+        // 不再跳转到 files tab，因为页面匹配功能已经在 files tab 中
       } else {
-        alert(`未找到与页面 "${pageNameInput}" 相关的文件\n\n请尝试：\n1. 检查页面名称是否正确\n2. 使用页面的英文名称\n3. 手动选择文件`);
+        alert(`未找到与页面 "${pageNameInput}" 相关的文件\n\n请尝试：\n1. 检查页面名称是否正确\n2. 使用页面的英文名称\n3. 切换到手动选择模式添加文件`);
         setMatchedPageFiles([]);
       }
     } catch (error) {
       console.error('[QA Reviewer] 搜索文件失败:', error);
       alert('搜索文件失败: ' + error.message);
     } finally {
-      setIsLoading(false);
+      setIsSearchingPage(false);
     }
   };
 
@@ -552,7 +595,8 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
       // 自动从需求中提取模块并查找相关文件
       await extractModulesFromRequirement();
 
-      // 跳转到选择文件 tab，而不是预览确认 tab
+      // 跳转到选择文件 tab，设置为手动选择模式
+      setFileSelectionMode('manualSelect');
       setActiveTab('files');
     } catch (error) {
       console.error('解析需求失败:', error);
@@ -593,7 +637,7 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
         incrementalMode,
         selectedFiles: selectedFiles.length > 0 ? selectedFiles : null,
         selectedModules: selectedModules.length > 0 ? selectedModules : null,
-        reviewEntireProject: reviewEntireProject || (selectedFiles.length === 0 && !requirementContent && selectedModules.length === 0),
+        reviewEntireProject: fileSelectionMode === 'entireProject',
       });
 
       if (result.success) {
@@ -1020,7 +1064,7 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
           <button
             className={`qa-reviewer-tab ${activeTab === 'preview' ? 'active' : ''}`}
             onClick={() => setActiveTab('preview')}
-            disabled={selectedFiles.length === 0}
+            disabled={fileSelectionMode !== 'entireProject' && selectedFiles.length === 0}
           >
             📊 预览确认
           </button>
@@ -1037,42 +1081,6 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
           {/* Upload Tab */}
           {activeTab === 'upload' && (
             <div className="qa-reviewer-upload-section">
-              {/* 页面名称输入 */}
-              <div className="qa-reviewer-section">
-                <h3>🔍 页面匹配</h3>
-                <div className="qa-reviewer-input-group">
-                  <p className="qa-reviewer-hint">
-                    输入页面名称（中英文皆可），系统将通过多语言包自动匹配相关文件
-                  </p>
-                  <div className="qa-reviewer-input-actions">
-                    <input
-                      type="text"
-                      className="qa-reviewer-input"
-                      placeholder="例如：账号管理、UserAccount、使用者帳號..."
-                      value={pageNameInput}
-                      onChange={(e) => setPageNameInput(e.target.value)}
-                      onKeyPress={(e) => {
-                        if (e.key === 'Enter') {
-                          handleSearchByPageName();
-                        }
-                      }}
-                    />
-                    <button
-                      className="qa-reviewer-btn qa-reviewer-btn-primary"
-                      onClick={handleSearchByPageName}
-                      disabled={isLoading || !pageNameInput.trim()}
-                    >
-                      {isLoading ? '🔍 搜索中...' : '🔍 匹配文件'}
-                    </button>
-                  </div>
-                  {matchedPageFiles.length > 0 && (
-                    <div className="qa-reviewer-file-info">
-                      ✅ 已找到 {matchedPageFiles.length} 个相关文件
-                    </div>
-                  )}
-                </div>
-              </div>
-
               {/* 需求文档 */}
               <div className="qa-reviewer-section">
                 <h3>📄 需求文档</h3>
@@ -1229,117 +1237,261 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
           {/* Files Tab */}
           {activeTab === 'files' && (
             <div className="qa-reviewer-files-section">
-              {/* 从需求提取的模块 */}
-              <div className="qa-reviewer-section">
-                <h3>🔍 从需求中提取的页面/模块</h3>
-                <div className="qa-reviewer-module-extraction">
+              {/* 审查范围选择器 */}
+              <div className="qa-reviewer-scope-selector">
+                <label className="qa-reviewer-scope-label">审查范围</label>
+                <div className="qa-reviewer-scope-options">
+                  {/* 整个项目 */}
                   <button
-                    className="qa-reviewer-btn qa-reviewer-btn-secondary"
-                    onClick={() => extractModulesFromRequirement()}
-                    disabled={!requirementText}
+                    className={`qa-reviewer-scope-card ${fileSelectionMode === 'entireProject' ? 'active' : ''}`}
+                    onClick={() => handleScopeChange('entireProject')}
                   >
-                    🔄 从需求中提取模块
+                    <div className="qa-reviewer-scope-card-inner">
+                      <span className="qa-reviewer-scope-icon">📁</span>
+                      <div className="qa-reviewer-scope-text">
+                        <div className="qa-reviewer-scope-title">整个项目</div>
+                        <div className="qa-reviewer-scope-desc">审查项目所有代码文件</div>
+                      </div>
+                      {fileSelectionMode === 'entireProject' && (
+                        <div className="qa-reviewer-scope-check">
+                          <svg className="qa-reviewer-scope-check-icon" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
                   </button>
-                  <p className="qa-reviewer-hint">
-                    自动从需求文本中识别页面、模块和功能点
-                  </p>
-                </div>
 
-                {extractedModules.length > 0 && (
-                  <div className="qa-reviewer-modules-list">
-                    <p className="qa-reviewer-modules-title">已识别的模块：</p>
-                    <div className="qa-reviewer-modules-grid">
-                      {extractedModules.map((module, index) => (
-                        <label key={index} className="qa-reviewer-module-checkbox">
-                          <input
-                            type="checkbox"
-                            checked={selectedModules.includes(module)}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setSelectedModules([...selectedModules, module]);
-                              } else {
-                                setSelectedModules(selectedModules.filter(m => m !== module));
-                              }
-                            }}
-                          />
-                          <span>{module}</span>
-                        </label>
-                      ))}
+                  {/* 页面匹配 */}
+                  <button
+                    className={`qa-reviewer-scope-card ${fileSelectionMode === 'pageMatch' ? 'active' : ''}`}
+                    onClick={() => handleScopeChange('pageMatch')}
+                  >
+                    <div className="qa-reviewer-scope-card-inner">
+                      <span className="qa-reviewer-scope-icon">🔍</span>
+                      <div className="qa-reviewer-scope-text">
+                        <div className="qa-reviewer-scope-title">页面匹配</div>
+                        <div className="qa-reviewer-scope-desc">通过页面名称自动匹配相关文件</div>
+                      </div>
+                      {fileSelectionMode === 'pageMatch' && (
+                        <div className="qa-reviewer-scope-check">
+                          <svg className="qa-reviewer-scope-check-icon" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+                  </button>
+
+                  {/* 手动选择 */}
+                  <button
+                    className={`qa-reviewer-scope-card ${fileSelectionMode === 'manualSelect' ? 'active' : ''}`}
+                    onClick={() => handleScopeChange('manualSelect')}
+                  >
+                    <div className="qa-reviewer-scope-card-inner">
+                      <span className="qa-reviewer-scope-icon">✋</span>
+                      <div className="qa-reviewer-scope-text">
+                        <div className="qa-reviewer-scope-title">手动选择</div>
+                        <div className="qa-reviewer-scope-desc">从需求提取模块或手动添加文件</div>
+                      </div>
+                      {fileSelectionMode === 'manualSelect' && (
+                        <div className="qa-reviewer-scope-check">
+                          <svg className="qa-reviewer-scope-check-icon" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+                  </button>
+                </div>
+              </div>
+
+              {/* 模式内容区 */}
+              {fileSelectionMode === 'entireProject' && (
+                <div className="qa-reviewer-scope-content">
+                  <div className="qa-reviewer-entire-project-info">
+                    <p>将审查项目中所有代码文件，可能需要较长时间</p>
+                  </div>
+                </div>
+              )}
+
+              {fileSelectionMode === 'pageMatch' && (
+                <div className="qa-reviewer-scope-content">
+                  {/* 页面匹配输入区域 */}
+                  <div className="qa-reviewer-section">
+                    <h3>🔍 页面匹配</h3>
+                    <div className="qa-reviewer-input-group">
+                      <p className="qa-reviewer-hint">
+                        输入页面名称（中英文皆可），系统将通过多语言包自动匹配相关文件
+                      </p>
+                      <div className="qa-reviewer-input-actions">
+                        <input
+                          type="text"
+                          className="qa-reviewer-input"
+                          placeholder="例如：账号管理、UserAccount、使用者帳號..."
+                          value={pageNameInput}
+                          onChange={(e) => setPageNameInput(e.target.value)}
+                          onKeyPress={(e) => {
+                            if (e.key === 'Enter') {
+                              handleSearchByPageName();
+                            }
+                          }}
+                        />
+                        <button
+                          className="qa-reviewer-btn qa-reviewer-btn-primary"
+                          onClick={handleSearchByPageName}
+                          disabled={isSearchingPage || !pageNameInput.trim()}
+                        >
+                          {isSearchingPage ? '🔍 搜索中...' : '🔍 匹配文件'}
+                        </button>
+                      </div>
                     </div>
                   </div>
-                )}
-              </div>
 
-              {/* 文件列表 */}
-              <div className="qa-reviewer-section">
-                <div className="qa-reviewer-section-header">
-                  <h3>📁 要审查的文件 ({selectedFiles.length})</h3>
-                  <button
-                    className="qa-reviewer-btn qa-reviewer-btn-secondary"
-                    onClick={handleAddFile}
-                  >
-                    ➕ 添加文件
-                  </button>
+                  {/* 匹配到的文件列表 */}
+                  {matchedPageFiles.length > 0 && (
+                    <div className="qa-reviewer-section">
+                      <div className="qa-reviewer-section-header">
+                        <h3>📁 匹配到的文件 ({matchedPageFiles.length})</h3>
+                      </div>
+                      <div className="qa-reviewer-files-list">
+                        {matchedPageFiles.map((file, index) => {
+                          const fileName = file.name || (file.path || '').split(/[/\\]/).pop();
+                          const filePath = file.path || file;
+                          const fileType = file.type || file.fileType || '';
+                          return (
+                            <div key={index} className="qa-reviewer-file-item">
+                              <div className="qa-reviewer-file-info">
+                                <span className="qa-reviewer-file-name">
+                                  {fileName}
+                                </span>
+                                {fileType && (
+                                  <span className="qa-reviewer-file-type-badge">{fileType}</span>
+                                )}
+                                <span
+                                  className="qa-reviewer-file-path"
+                                  title={filePath}
+                                >
+                                  {filePath}
+                                </span>
+                              </div>
+                              <button
+                                className="qa-reviewer-file-remove"
+                                onClick={() => {
+                                  // 从匹配结果和选中文件中同时移除
+                                  setMatchedPageFiles(matchedPageFiles.filter(f => (f.path || f) !== filePath));
+                                  setSelectedFiles(selectedFiles.filter(f => (f.path || f) !== filePath));
+                                }}
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
+              )}
 
-                {/* 审查整个项目选项 */}
-                <div className="qa-reviewer-option-row">
-                  <label className="qa-reviewer-checkbox-label">
-                    <input
-                      type="checkbox"
-                      checked={reviewEntireProject}
-                      onChange={(e) => setReviewEntireProject(e.target.checked)}
-                    />
-                    <span>审查整个项目（不限制文件范围）</span>
-                  </label>
-                  <span className="qa-reviewer-hint">
-                    如果勾选，将分析整个项目代码，可能需要较长时间
-                  </span>
-                </div>
-
-                {selectedFiles.length === 0 ? (
-                  <div className="qa-reviewer-empty-state">
-                    <p>{reviewEntireProject ? '将审查整个项目' : '尚未选择任何文件'}</p>
-                    {!reviewEntireProject && (
+              {fileSelectionMode === 'manualSelect' && (
+                <div className="qa-reviewer-scope-content">
+                  {/* 从需求提取的模块 */}
+                  <div className="qa-reviewer-section">
+                    <h3>🔍 从需求中提取的页面/模块</h3>
+                    <div className="qa-reviewer-module-extraction">
                       <button
-                        className="qa-reviewer-btn qa-reviewer-btn-primary"
-                        onClick={() => findFilesForModules()}
-                        disabled={selectedModules.length === 0}
+                        className="qa-reviewer-btn qa-reviewer-btn-secondary"
+                        onClick={() => extractModulesFromRequirement()}
+                        disabled={!requirementText}
                       >
-                        根据选择的模块自动匹配文件
+                        🔄 从需求中提取模块
                       </button>
+                      <p className="qa-reviewer-hint">
+                        自动从需求文本中识别页面、模块和功能点
+                      </p>
+                    </div>
+
+                    {extractedModules.length > 0 && (
+                      <div className="qa-reviewer-modules-list">
+                        <p className="qa-reviewer-modules-title">已识别的模块：</p>
+                        <div className="qa-reviewer-modules-grid">
+                          {extractedModules.map((module, index) => (
+                            <label key={index} className="qa-reviewer-module-checkbox">
+                              <input
+                                type="checkbox"
+                                checked={selectedModules.includes(module)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedModules([...selectedModules, module]);
+                                  } else {
+                                    setSelectedModules(selectedModules.filter(m => m !== module));
+                                  }
+                                }}
+                              />
+                              <span>{module}</span>
+                            </label>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
-                ) : (
-                  <div className="qa-reviewer-files-list">
-                    {selectedFiles.map((file, index) => {
-                      const fileName = file.name || (file.path || '').split(/[/\\]/).pop();
-                      const filePath = file.path || file;
-                      return (
-                        <div key={index} className="qa-reviewer-file-item">
-                          <div className="qa-reviewer-file-info">
-                            <span className="qa-reviewer-file-name">
-                              {fileName}
-                            </span>
-                            <span
-                              className="qa-reviewer-file-path"
-                              title={filePath}
-                            >
-                              {filePath}
-                            </span>
-                          </div>
-                          <button
-                            className="qa-reviewer-file-remove"
-                            onClick={() => handleRemoveFile(filePath)}
-                          >
-                            ✕
-                          </button>
-                        </div>
-                      );
-                    })}
+
+                  {/* 文件列表 */}
+                  <div className="qa-reviewer-section">
+                    <div className="qa-reviewer-section-header">
+                      <h3>📁 要审查的文件 ({selectedFiles.length})</h3>
+                      <button
+                        className="qa-reviewer-btn qa-reviewer-btn-secondary"
+                        onClick={handleAddFile}
+                      >
+                        ➕ 添加文件
+                      </button>
+                    </div>
+
+                    {selectedFiles.length === 0 ? (
+                      <div className="qa-reviewer-empty-state">
+                        <p>尚未选择任何文件</p>
+                        <button
+                          className="qa-reviewer-btn qa-reviewer-btn-primary"
+                          onClick={() => findFilesForModules()}
+                          disabled={selectedModules.length === 0}
+                        >
+                          根据选择的模块自动匹配文件
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="qa-reviewer-files-list">
+                        {selectedFiles.map((file, index) => {
+                          const fileName = file.name || (file.path || '').split(/[/\\]/).pop();
+                          const filePath = file.path || file;
+                          return (
+                            <div key={index} className="qa-reviewer-file-item">
+                              <div className="qa-reviewer-file-info">
+                                <span className="qa-reviewer-file-name">
+                                  {fileName}
+                                </span>
+                                <span
+                                  className="qa-reviewer-file-path"
+                                  title={filePath}
+                                >
+                                  {filePath}
+                                </span>
+                              </div>
+                              <button
+                                className="qa-reviewer-file-remove"
+                                onClick={() => handleRemoveFile(filePath)}
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
+                </div>
+              )}
 
               {/* 操作按钮 */}
               <div className="qa-reviewer-actions">
@@ -1352,7 +1504,7 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
                 <button
                   className="qa-reviewer-btn qa-reviewer-btn-primary"
                   onClick={() => setActiveTab('preview')}
-                  disabled={selectedFiles.length === 0}
+                  disabled={isNextButtonDisabled()}
                 >
                   下一步：预览确认 →
                 </button>
@@ -1430,7 +1582,7 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
                 <h3>📋 审查摘要</h3>
                 <div className="qa-reviewer-summary-stats">
                   <div className="qa-reviewer-stat">
-                    <span className="qa-reviewer-stat-value">{selectedFiles.length}</span>
+                    <span className="qa-reviewer-stat-value">{fileSelectionMode === 'entireProject' ? '全部' : selectedFiles.length}</span>
                     <span className="qa-reviewer-stat-label">文件数</span>
                   </div>
                   <div className="qa-reviewer-stat">
@@ -1469,10 +1621,12 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
               {/* 选择的文件列表 */}
               <div className="qa-reviewer-section">
                 <div className="qa-reviewer-section-header">
-                  <h3>📁 将要审查的文件 ({selectedFiles.length})</h3>
+                  <h3>📁 将要审查的文件 ({fileSelectionMode === 'entireProject' ? '整个项目' : selectedFiles.length})</h3>
                 </div>
                 <div className="qa-reviewer-files-preview">
-                  {selectedFiles.length === 0 ? (
+                  {fileSelectionMode === 'entireProject' ? (
+                    <p className="qa-reviewer-empty-text">将审查整个项目的所有代码文件</p>
+                  ) : selectedFiles.length === 0 ? (
                     <p className="qa-reviewer-empty-text">未选择任何文件</p>
                   ) : (
                     <>
