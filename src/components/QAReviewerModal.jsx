@@ -413,19 +413,24 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
     setFileSelectionMode(newMode);
 
     if (newMode === 'entireProject') {
-      // 切换到整个项目时清空已选文件（不需要文件）
       setSelectedFiles([]);
       setMatchedPageFiles([]);
+      setIncrementalMode(false);
     } else if (newMode === 'pageMatch') {
-      // 切换到页面匹配时，如果有匹配结果则保留
       if (matchedPageFiles.length > 0) {
         setSelectedFiles(matchedPageFiles);
       } else {
         setSelectedFiles([]);
       }
+      setIncrementalMode(false);
     } else if (newMode === 'manualSelect') {
-      // 切换到手动选择时清空匹配结果，保留手动选择的文件
       setMatchedPageFiles([]);
+      setIncrementalMode(false);
+    } else if (newMode === 'incremental') {
+      // 增量审查模式，清空手动选的文件
+      setSelectedFiles([]);
+      setMatchedPageFiles([]);
+      setIncrementalMode(true);
     }
   };
 
@@ -435,6 +440,10 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
   const isNextButtonDisabled = () => {
     if (fileSelectionMode === 'entireProject') {
       return false; // 整个项目模式始终允许继续
+    }
+    if (fileSelectionMode === 'incremental') {
+      // 增量审查模式：需要有变更文件
+      return !changedFilesStats || changedFilesStats.total === 0;
     }
     if (fileSelectionMode === 'pageMatch') {
       return matchedPageFiles.length === 0; // 页面匹配模式需要至少有匹配结果
@@ -685,9 +694,9 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
         diffScope,                  // 增量审查：diff 范围
         baseBranch,                 // 增量审查：分支对比时的目标分支
         includeDependencies,        // 增量审查：是否包含依赖文件
-        selectedFiles: selectedFiles.length > 0 ? selectedFiles : null,
-        selectedModules: selectedModules.length > 0 ? selectedModules : null,
-        reviewEntireProject: fileSelectionMode === 'entireProject',
+        selectedFiles: incrementalMode ? null : (selectedFiles.length > 0 ? selectedFiles : null),
+        selectedModules: incrementalMode ? null : (selectedModules.length > 0 ? selectedModules : null),
+        reviewEntireProject: !incrementalMode && fileSelectionMode === 'entireProject',
       });
 
       if (result.success) {
@@ -1353,11 +1362,126 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
                       )}
                     </div>
                   </button>
+
+                  {/* 增量审查 (Git diff) */}
+                  <button
+                    className={`qa-reviewer-scope-card ${fileSelectionMode === 'incremental' ? 'active' : ''}`}
+                    onClick={() => {
+                      handleScopeChange('incremental');
+                      setIncrementalMode(true);
+                      // 自动检测 git 状态和分支列表
+                      handlePreviewChangedFiles();
+                    }}
+                  >
+                    <div className="qa-reviewer-scope-card-inner">
+                      <span className="qa-reviewer-scope-icon">🔄</span>
+                      <div className="qa-reviewer-scope-text">
+                        <div className="qa-reviewer-scope-title">增量审查</div>
+                        <div className="qa-reviewer-scope-desc">基于 Git diff 只审查变更文件</div>
+                      </div>
+                      {fileSelectionMode === 'incremental' && (
+                        <div className="qa-reviewer-scope-check">
+                          <svg className="qa-reviewer-scope-check-icon" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        </div>
+                      )}
+                    </div>
+                  </button>
                 </div>
               </div>
 
-              {/* 模式内容区 */}
-              {fileSelectionMode === 'entireProject' && (
+              {/* 增量审查选项（Git diff） */}
+              {fileSelectionMode === 'incremental' && (
+                <div className="qa-reviewer-scope-content">
+                  <div className="qa-reviewer-incremental-config" style={{ padding: '12px', background: '#f0f9ff', borderRadius: '8px', border: '1px solid #bee3f8' }}>
+                    {!isGitRepo ? (
+                      <p style={{ color: '#e53e3e', fontSize: '14px', textAlign: 'center', padding: '20px' }}>
+                        ⚠️ 该项目不是 Git 仓库，无法使用增量审查，请选择其他审查范围
+                      </p>
+                    ) : (
+                      <>
+                        <div style={{ marginBottom: '12px' }}>
+                          <label style={{ fontSize: '14px', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
+                            Diff 范围
+                          </label>
+                          <select
+                            value={diffScope}
+                            onChange={(e) => { setDiffScope(e.target.value); setChangedFilesPreview([]); setChangedFilesStats(null); }}
+                            style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid #ccc', fontSize: '14px' }}
+                          >
+                            <option value="unstaged">未暂存修改 (git diff)</option>
+                            <option value="staged">已暂存修改 (git diff --cached)</option>
+                            <option value="lastCommit">最近一次提交 (HEAD~1..HEAD)</option>
+                            <option value="branchCompare">与指定分支对比</option>
+                          </select>
+                        </div>
+
+                        {diffScope === 'branchCompare' && (
+                          <div style={{ marginBottom: '12px' }}>
+                            <label style={{ fontSize: '14px', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
+                              对比分支
+                            </label>
+                            <select
+                              value={baseBranch}
+                              onChange={(e) => setBaseBranch(e.target.value)}
+                              style={{ width: '100%', padding: '8px', borderRadius: '6px', border: '1px solid #ccc', fontSize: '14px' }}
+                            >
+                              {availableBranches.length > 0
+                                ? availableBranches.map(b => (
+                                  <option key={b.name} value={b.name}>
+                                    {b.name}{b.isCurrent ? ' (当前)' : ''}{b.isRemote ? ' (远程)' : ''}
+                                  </option>
+                                ))
+                                : <option value="main">main</option>
+                              }
+                            </select>
+                          </div>
+                        )}
+
+                        <label className="qa-reviewer-checkbox" style={{ marginBottom: '12px' }}>
+                          <input
+                            type="checkbox"
+                            checked={includeDependencies}
+                            onChange={(e) => setIncludeDependencies(e.target.checked)}
+                          />
+                          <span>自动包含关联依赖文件（import 源和被引用文件）</span>
+                        </label>
+
+                        <button
+                          className="qa-reviewer-btn qa-reviewer-btn-primary"
+                          style={{ width: '100%', fontSize: '14px', padding: '10px' }}
+                          onClick={handlePreviewChangedFiles}
+                          disabled={isDetectingGit}
+                        >
+                          {isDetectingGit ? '⏳ 检测中...' : '🔍 预览变更文件'}
+                        </button>
+
+                        {changedFilesStats && (
+                          <div style={{ marginTop: '12px', padding: '10px', background: '#e8f5e9', borderRadius: '6px' }}>
+                            <p style={{ fontSize: '14px', fontWeight: 'bold', color: '#2d3748' }}>
+                              📊 变更统计: {changedFilesStats.total} 个文件
+                              (新增 {changedFilesStats.added}, 修改 {changedFilesStats.modified},
+                              删除 {changedFilesStats.deleted}, 重命名 {changedFilesStats.renamed})
+                            </p>
+                            {changedFilesPreview.length > 0 && (
+                              <ul style={{ margin: '8px 0 0', paddingLeft: '16px', maxHeight: '150px', overflowY: 'auto' }}>
+                                {changedFilesPreview.slice(0, 20).map(f => (
+                                  <li key={f.path} style={{ fontSize: '13px', color: '#4a5568', padding: '2px 0' }}>
+                                    {f.status === 'added' ? '🆕' : f.status === 'modified' ? '✏️' : f.status === 'deleted' ? '❌' : '🔄'}
+                                    {' '}{f.relativePath || f.path.split('/').pop()}
+                                  </li>
+                                ))}
+                                {changedFilesPreview.length > 20 && <li style={{ fontSize: '13px', color: '#718096' }}>...还有 {changedFilesPreview.length - 20} 个文件</li>}
+                              </ul>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}              {fileSelectionMode === 'entireProject' && (
                 <div className="qa-reviewer-scope-content">
                   <div className="qa-reviewer-entire-project-info">
                     <p>将审查项目中所有代码文件，可能需要较长时间</p>
