@@ -846,7 +846,7 @@ function App() {
    */
   const handleScanCode = async () => {
     if (!selectedFile && files.length === 0) {
-      setOutput({ type: 'warning', message: '⚠️ 请先添加文件。此功能仅在桌面应用中可用。' });
+      setOutput({ type: 'warning', message: '⚠️ 请先添加文件或文件夹，才能进行代码扫描' });
       return;
     }
 
