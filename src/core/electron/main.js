@@ -6472,9 +6472,80 @@ ipcMain.handle('qa-reviewer:execute', async (event, params) => {
     await reviewer.initialize(projectPath);
 
     let plan;
+    let segments;
+    let incrementalMetadata = null; // 增量审查元数据
 
     // 如果用户手动选择了文件，按功能模块智能分组
-    if (params.selectedFiles && params.selectedFiles.length > 0) {
+    // ==================== 增量审查分支 ====================
+    if (params.incrementalMode) {
+      console.log('[QA Reviewer] 增量审查模式，diffScope:', params.diffScope);
+
+      const GitDiffService = require('../qa-reviewer/utils/git-diff-service');
+      const gitService = new GitDiffService();
+
+      // 检测 git 仓库
+      const isGit = gitService.isGitRepository(global.currentProjectPath);
+      if (!isGit) {
+        return {
+          success: false,
+          error: '该项目不是 Git 仓库，无法使用增量审查',
+          hint: '请切换到全量审查模式'
+        };
+      }
+
+      // 获取变更文件和 diff
+      const diffResult = gitService.getChangedFiles(
+        global.currentProjectPath,
+        params.diffScope || 'unstaged',
+        params.baseBranch || 'main'
+      );
+
+      if (diffResult.files.length === 0) {
+        return {
+          success: false,
+          error: '在指定范围内没有发现变更文件',
+          hint: '请检查 Git diff 范围设置，或切换到全量审查模式'
+        };
+      }
+
+      // 获取相关依赖文件
+      let dependencyFiles = [];
+      if (params.includeDependencies) {
+        const changedFilePaths = diffResult.files.map(f => f.path);
+        // 加载代码图作为依赖查找的数据源
+        let codeGraph = null;
+        try {
+          const graphEntry = agentMemory.semantic.getLatestCodeGraph(global.currentProjectPath);
+          if (graphEntry && graphEntry.value) codeGraph = graphEntry.value;
+        } catch (e) { /* 代码图加载失败不影响 */ }
+
+        dependencyFiles = gitService.getRelatedDependencies(
+          global.currentProjectPath, changedFilePaths, codeGraph
+        );
+        console.log(`[QA Reviewer] 增量审查: ${changedFilePaths.length} 个变更文件, ${dependencyFiles.length} 个依赖文件`);
+      }
+
+      // 使用 IncrementalStrategy 创建分段计划
+      const IncrementalStrategy = require('../qa-reviewer/strategies/incremental-strategy');
+      const strategy = new IncrementalStrategy({
+        maxFilesPerSegment: params.maxFilesPerSegment || 10,
+        codeGraphAdapter: reviewer.adapters?.codeGraph || null,
+      });
+
+      const planResult = strategy.createPlan(
+        global.currentProjectPath,
+        diffResult,
+        dependencyFiles,
+        { diffScope: params.diffScope || 'unstaged', includeDependencies: params.includeDependencies }
+      );
+
+      segments = planResult.segments;
+      // 保存增量审查元数据到结果中
+      incrementalMetadata = planResult.metadata;
+    }
+
+    // ==================== 全量审查分支 ====================
+    if (!params.incrementalMode && params.selectedFiles && params.selectedFiles.length > 0) {
       console.log(`[QA Reviewer] 使用用户选择的 ${params.selectedFiles.length} 个文件`);
 
       // 将文件转换为路径字符串
@@ -6538,7 +6609,7 @@ ipcMain.handle('qa-reviewer:execute', async (event, params) => {
           totalFiles: filePaths.length,
         });
       }
-    } else if (params.selectedModules && params.selectedModules.length > 0) {
+    } else if (!params.incrementalMode && params.selectedModules && params.selectedModules.length > 0) {
       // 根据选择的模块查找相关文件
       console.log(`[QA Reviewer] 根据选择的 ${params.selectedModules.length} 个模块查找相关文件`);
       console.log(`[QA Reviewer] 选择的模块:`, params.selectedModules);
@@ -6679,7 +6750,7 @@ ipcMain.handle('qa-reviewer:execute', async (event, params) => {
         segments,
         totalFiles: finalFilePaths.length,
       });
-    } else if (params.reviewEntireProject) {
+    } else if (!params.incrementalMode && params.reviewEntireProject) {
       // 审查整个项目
       console.log(`[QA Reviewer] 审查整个项目`);
 
@@ -6955,6 +7026,11 @@ ipcMain.handle('qa-reviewer:execute', async (event, params) => {
         invalidIssues,
         _parseError: hasParseError || undefined,
         _parseErrors: hasParseError ? parseErrors : undefined,
+        // 增量审查标记
+        reviewType: incrementalMetadata ? 'incremental' : 'full',
+        diffScope: incrementalMetadata?.diffScope || undefined,
+        changedFileCount: incrementalMetadata?.changedFileCount || undefined,
+        dependencyFileCount: incrementalMetadata?.dependencyFileCount || undefined,
       },
     };
   } catch (error) {
@@ -7578,6 +7654,60 @@ ipcMain.handle('qa-reviewer:cancel', async (event) => {
 
     return { success: true };
   } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ==================== Git 增量审查 IPC ====================
+
+/**
+ * 获取 git 变更文件列表（增量审查预览用）
+ */
+ipcMain.handle('qa-reviewer:get-git-changed-files', async (event, params) => {
+  try {
+    const { projectPath, diffScope, baseBranch } = params;
+    if (!projectPath) {
+      return { success: false, error: '请先选择项目文件夹' };
+    }
+
+    const GitDiffService = require('../qa-reviewer/utils/git-diff-service');
+    const gitService = new GitDiffService();
+
+    // 先检测是否是 git 仓库
+    const isGit = gitService.isGitRepository(projectPath);
+    if (!isGit) {
+      return { success: false, error: '该项目不是 Git 仓库，无法使用增量审查' };
+    }
+
+    const result = gitService.getChangedFiles(projectPath, diffScope || 'unstaged', baseBranch || 'main');
+    return { success: true, files: result.files, stats: result.stats };
+  } catch (error) {
+    console.error('[qa-reviewer:get-git-changed-files] 错误:', error.message);
+    return { success: false, error: error.message };
+  }
+});
+
+/**
+ * 获取 git 分支列表（增量审查配置用）
+ */
+ipcMain.handle('qa-reviewer:get-git-branches', async (event, projectPath) => {
+  try {
+    if (!projectPath) {
+      return { success: false, error: '请先选择项目文件夹' };
+    }
+
+    const GitDiffService = require('../qa-reviewer/utils/git-diff-service');
+    const gitService = new GitDiffService();
+
+    const isGit = gitService.isGitRepository(projectPath);
+    if (!isGit) {
+      return { success: false, error: '该项目不是 Git 仓库' };
+    }
+
+    const branches = gitService.getBranches(projectPath);
+    return { success: true, branches };
+  } catch (error) {
+    console.error('[qa-reviewer:get-git-branches] 错误:', error.message);
     return { success: false, error: error.message };
   }
 });

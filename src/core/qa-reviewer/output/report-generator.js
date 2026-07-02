@@ -46,6 +46,11 @@ class ReportGenerator {
         timestamp: new Date().toISOString(),
         version: '1.0.0',
         reviewer: 'AI QA Reviewer',
+        // 增量审查标记
+        reviewType: report.reviewType || 'full',
+        diffScope: report.diffScope || undefined,
+        changedFileCount: report.changedFileCount || undefined,
+        dependencyFileCount: report.dependencyFileCount || undefined,
       },
       summary: {
         overallStatus: report.totalIssues === 0 ? 'passed' : 'failed',

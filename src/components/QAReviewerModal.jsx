@@ -64,6 +64,14 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
   const [parallelSegments, setParallelSegments] = useState(2);
   const [maxFilesPerSegment, setMaxFilesPerSegment] = useState(10);
   const [incrementalMode, setIncrementalMode] = useState(false);
+  const [diffScope, setDiffScope] = useState('unstaged'); // 'unstaged' | 'staged' | 'lastCommit' | 'branchCompare'
+  const [baseBranch, setBaseBranch] = useState('main');
+  const [includeDependencies, setIncludeDependencies] = useState(true);
+  const [changedFilesPreview, setChangedFilesPreview] = useState([]);
+  const [changedFilesStats, setChangedFilesStats] = useState(null);
+  const [availableBranches, setAvailableBranches] = useState([]);
+  const [isDetectingGit, setIsDetectingGit] = useState(false);
+  const [isGitRepo, setIsGitRepo] = useState(true); // 默认 true，检测失败时变 false
   const [fileSelectionMode, setFileSelectionMode] = useState('pageMatch'); // 'entireProject' | 'pageMatch' | 'manualSelect'
   const [isSearchingPage, setIsSearchingPage] = useState(false); // 页面匹配专用加载状态
 
@@ -607,6 +615,45 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
   };
 
   /**
+   * 预览 Git 变更文件（增量审查配置用）
+   */
+  const handlePreviewChangedFiles = async () => {
+    setIsDetectingGit(true);
+    try {
+      // 获取变更文件列表
+      const result = await electronAPI.getGitChangedFiles({
+        projectPath,
+        diffScope,
+        baseBranch: diffScope === 'branchCompare' ? baseBranch : 'main'
+      });
+
+      if (!result.success) {
+        setIsGitRepo(false);
+        setChangedFilesPreview([]);
+        setChangedFilesStats(null);
+        return;
+      }
+
+      setIsGitRepo(true);
+      setChangedFilesPreview(result.files || []);
+      setChangedFilesStats(result.stats || null);
+
+      // 如果是 branchCompare 模式且还没加载分支列表，自动加载
+      if (diffScope === 'branchCompare' && availableBranches.length === 0) {
+        const branchesResult = await electronAPI.getGitBranches(projectPath);
+        if (branchesResult.success) {
+          setAvailableBranches(branchesResult.branches || []);
+        }
+      }
+    } catch (err) {
+      setIsGitRepo(false);
+      console.error('预览变更文件失败:', err);
+    } finally {
+      setIsDetectingGit(false);
+    }
+  };
+
+  /**
    * 开始审查
    */
   const handleStartReview = async () => {
@@ -635,6 +682,9 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
         parallelSegments: parseInt(parallelSegments),
         maxFilesPerSegment: parseInt(maxFilesPerSegment),
         incrementalMode,
+        diffScope,                  // 增量审查：diff 范围
+        baseBranch,                 // 增量审查：分支对比时的目标分支
+        includeDependencies,        // 增量审查：是否包含依赖文件
         selectedFiles: selectedFiles.length > 0 ? selectedFiles : null,
         selectedModules: selectedModules.length > 0 ? selectedModules : null,
         reviewEntireProject: fileSelectionMode === 'entireProject',
@@ -1552,15 +1602,113 @@ function QAReviewerModal({ isOpen, onClose, electronAPI, projectPath }) {
               </div>
 
               <div className="qa-reviewer-section">
-                <h3>🔄 其他选项</h3>
-                <label className="qa-reviewer-checkbox">
-                  <input
-                    type="checkbox"
-                    checked={incrementalMode}
-                    onChange={(e) => setIncrementalMode(e.target.checked)}
-                  />
-                  <span>仅审查变更文件（Git diff）</span>
-                </label>
+                <h3>🔄 审查模式</h3>
+                <div style={{ display: 'flex', gap: '12px', marginBottom: '8px' }}>
+                  <label className="qa-reviewer-checkbox">
+                    <input
+                      type="radio"
+                      name="reviewMode"
+                      checked={!incrementalMode}
+                      onChange={() => setIncrementalMode(false)}
+                    />
+                    <span>全量审查</span>
+                  </label>
+                  <label className="qa-reviewer-checkbox">
+                    <input
+                      type="radio"
+                      name="reviewMode"
+                      checked={incrementalMode}
+                      onChange={() => setIncrementalMode(true)}
+                      disabled={!isGitRepo}
+                    />
+                    <span>增量审查（Git diff）</span>
+                  </label>
+                </div>
+                {!isGitRepo && (
+                  <p style={{ color: '#e53e3e', fontSize: '13px', margin: '4px 0' }}>
+                    ⚠️ 该项目不是 Git 仓库，无法使用增量审查
+                  </p>
+                )}
+
+                {incrementalMode && (
+                  <div className="qa-reviewer-incremental-config" style={{ marginTop: '12px', padding: '12px', background: '#f0f9ff', borderRadius: '8px', border: '1px solid #bee3f8' }}>
+                    <div style={{ marginBottom: '8px' }}>
+                      <label style={{ fontSize: '14px', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
+                        Diff 范围
+                      </label>
+                      <select
+                        value={diffScope}
+                        onChange={(e) => setDiffScope(e.target.value)}
+                        style={{ width: '100%', padding: '6px', borderRadius: '4px', border: '1px solid #ccc' }}
+                      >
+                        <option value="unstaged">未暂存修改 (git diff)</option>
+                        <option value="staged">已暂存修改 (git diff --cached)</option>
+                        <option value="lastCommit">最近一次提交 (HEAD~1..HEAD)</option>
+                        <option value="branchCompare">与指定分支对比</option>
+                      </select>
+                    </div>
+
+                    {diffScope === 'branchCompare' && (
+                      <div style={{ marginBottom: '8px' }}>
+                        <label style={{ fontSize: '14px', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
+                          对比分支
+                        </label>
+                        <select
+                          value={baseBranch}
+                          onChange={(e) => setBaseBranch(e.target.value)}
+                          style={{ width: '100%', padding: '6px', borderRadius: '4px', border: '1px solid #ccc' }}
+                        >
+                          {availableBranches.length > 0
+                            ? availableBranches.map(b => (
+                              <option key={b.name} value={b.name}>
+                                {b.name}{b.isCurrent ? ' (当前)' : ''}{b.isRemote ? ' (远程)' : ''}
+                              </option>
+                            ))
+                            : <option value="main">main</option>
+                          }
+                        </select>
+                      </div>
+                    )}
+
+                    <label className="qa-reviewer-checkbox" style={{ marginBottom: '8px' }}>
+                      <input
+                        type="checkbox"
+                        checked={includeDependencies}
+                        onChange={(e) => setIncludeDependencies(e.target.checked)}
+                      />
+                      <span>自动包含关联依赖文件（import 源和被引用文件）</span>
+                    </label>
+
+                    <button
+                      className="qa-reviewer-btn qa-reviewer-btn-secondary"
+                      style={{ fontSize: '13px', padding: '4px 12px' }}
+                      onClick={handlePreviewChangedFiles}
+                      disabled={isDetectingGit}
+                    >
+                      {isDetectingGit ? '检测中...' : '🔍 预览变更文件'}
+                    </button>
+
+                    {changedFilesStats && (
+                      <div style={{ marginTop: '8px', fontSize: '13px', color: '#2d3748' }}>
+                        <p>变更统计: {changedFilesStats.total} 个文件
+                          (新增: {changedFilesStats.added}, 修改: {changedFilesStats.modified},
+                          删除: {changedFilesStats.deleted}, 重命名: {changedFilesStats.renamed})
+                        </p>
+                        {changedFilesPreview.length > 0 && (
+                          <ul style={{ margin: '4px 0', paddingLeft: '16px', maxHeight: '120px', overflowY: 'auto' }}>
+                            {changedFilesPreview.slice(0, 20).map(f => (
+                              <li key={f.path} style={{ fontSize: '12px', color: '#4a5568' }}>
+                                {f.status === 'added' ? '🆕' : f.status === 'modified' ? '✏️' : f.status === 'deleted' ? '❌' : '🔄'}
+                                {' '}{f.relativePath || f.path.split('/').pop()}
+                              </li>
+                            ))}
+                            {changedFilesPreview.length > 20 && <li style={{ fontSize: '12px', color: '#718096' }}>...还有 {changedFilesPreview.length - 20} 个文件</li>}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               <div className="qa-reviewer-actions">

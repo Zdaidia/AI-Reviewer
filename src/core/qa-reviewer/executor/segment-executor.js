@@ -3063,7 +3063,63 @@ ${truncatedContent}
     }
 
     // 构建系统提示
-    let systemPrompt = `你是一个资深的 QA 工程师，专注于前端代码审查。`;
+    // 增量审查模式引导
+    let incrementalPrompt = '';
+    const diffInfo = segment.metadata?.diffInfo || segment.metadata?.isIncremental ? {
+      changedFiles: segment.metadata?.changedFiles || [],
+      diffPatches: segment.metadata?.diffPatches || {},
+      changedFileStatuses: segment.metadata?.changedFileStatuses || [],
+      dependencyFiles: segment.metadata?.dependencyFiles || [],
+      diffScope: segment.metadata?.diffScope || 'unstaged',
+    } : null;
+
+    if (segment.metadata?.isIncremental) {
+      incrementalPrompt = `\n【🔴 增量审查模式】
+
+本次审查仅针对 Git 变更文件及其关联依赖。
+
+变更标记说明：
+  📌 行首带 [NEW] → 新增代码
+  ❌ 行首带 [DEL] → 删除代码
+  ✏️ 行首带 [MOD] → 修改代码
+
+审查重点变更（请优先关注标注了变更的代码）：
+1. 变更是否完整实现了需求中的对应功能
+2. 变更是否引入了新的 bug 或回归问题
+3. 变更是否与上下游代码的数据流一致
+4. 变更是否遗漏了必要的错误处理
+5. 变更的边界条件处理是否充分
+
+对于 🔵 关联依赖文件，只需确认其接口与变更代码的调用是否兼容。
+
+Diff 范围: ${diffInfo?.diffScope === 'unstaged' ? '未暂存修改 (git diff)'
+               : diffInfo?.diffScope === 'staged' ? '已暂存修改 (git diff --cached)'
+               : diffInfo?.diffScope === 'lastCommit' ? '最近一次提交 (HEAD~1..HEAD)'
+               : diffInfo?.diffScope === 'branchCompare' ? '与指定分支对比'
+               : diffInfo?.diffScope || '未指定'}
+变更文件数: ${diffInfo?.changedFiles?.length || 0}
+关联依赖文件数: ${diffInfo?.dependencyFiles?.length || 0}
+
+`;
+
+      // 对变更文件添加 diff 标注
+      if (diffInfo && diffInfo.diffPatches) {
+        const changedPaths = diffInfo.changedFiles || [];
+        // 遍历代码内容中的文件，为变更文件添加 diff 摘要标注
+        for (const changedPath of changedPaths) {
+          const patch = diffInfo.diffPatches[changedPath];
+          if (patch) {
+            // 在代码内容中标记变更文件
+            const fileName = path.basename(changedPath);
+            const patchSummary = this._extractDiffSummary(patch);
+            codeContent += `\n// 📌 变更文件: ${fileName} (路径: ${changedPath})\n`;
+            codeContent += `// 变更摘要: ${patchSummary}\n\n`;
+          }
+        }
+      }
+    }
+
+    let systemPrompt = `你是一个资深的 QA 工程师，专注于前端代码审查。${incrementalPrompt}`;
 
     if (useFunctionCalling) {
       // Function Calling 模式提示
@@ -6947,6 +7003,169 @@ ${typeof requirements === 'string' ? requirements : JSON.stringify(requirements,
     }
 
     return results;
+  }
+
+  /**
+   * 从 unified diff patch 中提取变更摘要
+   * @param {string} diffPatch - git diff 输出的 unified diff 格式
+   * @returns {string} 变更摘要描述
+   */
+  _extractDiffSummary(diffPatch) {
+    if (!diffPatch) return '无 diff 信息';
+
+    const lines = diffPatch.split('\n');
+    const changes = { added: 0, deleted: 0, modified: 0 };
+
+    for (const line of lines) {
+      if (line.startsWith('+') && !line.startsWith('+++')) changes.added++;
+      else if (line.startsWith('-') && !line.startsWith('---')) changes.deleted++;
+    }
+
+    const parts = [];
+    if (changes.added > 0) parts.push(`+${changes.added}行`);
+    if (changes.deleted > 0) parts.push(`-${changes.deleted}行`);
+
+    return parts.length > 0 ? parts.join(', ') : '无行级变更';
+  }
+
+  /**
+   * 将 diff 标注合入文件完整内容
+   * @param {string} fileContent - 文件完整内容
+   * @param {string} diffPatch - unified diff 格式的 patch
+   * @returns {string} 带标注的文件内容
+   */
+  annotateCodeWithDiff(fileContent, diffPatch) {
+    if (!diffPatch) return fileContent;
+
+    // 解析 diff 中的变更行号
+    const changeRanges = this._parseDiffHunks(diffPatch);
+    if (changeRanges.length === 0) return fileContent;
+
+    // 将行号映射到文件内容
+    const fileLines = fileContent.split('\n');
+    const annotatedLines = [];
+
+    for (let i = 0; i < fileLines.length; i++) {
+      const lineNum = i + 1;
+      const changeType = this._getLineChangeType(lineNum, changeRanges);
+
+      switch (changeType) {
+        case 'added':
+          annotatedLines.push(`[NEW] ${fileLines[i]}`);
+          break;
+        case 'modified':
+          annotatedLines.push(`[MOD] ${fileLines[i]}`);
+          break;
+        default:
+          annotatedLines.push(fileLines[i]);
+      }
+    }
+
+    // 对于删除的行，在对应位置插入注释行
+    for (const range of changeRanges) {
+      if (range.type === 'deleted' && range.originalLine) {
+        // 在删除行位置插入注释
+        const insertPos = Math.min(range.originalLine - 1, annotatedLines.length);
+        annotatedLines.splice(insertPos, 0, `[DEL] ${range.content || '(已删除行)'}`);
+      }
+    }
+
+    return annotatedLines.join('\n');
+  }
+
+  /**
+   * 解析 unified diff 中的 hunks（变更块）
+   * @param {string} diffPatch - unified diff 格式
+   * @returns {Array<{newStart, newCount, type, originalLine, content}>} 变更范围列表
+   */
+  _parseDiffHunks(diffPatch) {
+    const hunks = [];
+    const hunkPattern = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+    for (const line of diffPatch.split('\n')) {
+      const match = line.match(hunkPattern);
+      if (match) {
+        const newStart = parseInt(match[3]);
+        const newCount = parseInt(match[4] || '1');
+        hunks.push({
+          newStart,
+          newCount,
+          newEnd: newStart + newCount - 1,
+          type: 'mixed'
+        });
+      }
+    }
+
+    // 进一步细化：提取纯新增和纯修改的行
+    const changes = [];
+    let currentNewLine = 0;
+
+    for (const hunk of hunks) {
+      currentNewLine = hunk.newStart;
+      const hunkContent = this._extractHunkContent(diffPatch, hunk);
+
+      for (const hunkLine of hunkContent) {
+        if (hunkLine.startsWith('+') && !hunkLine.startsWith('+++')) {
+          changes.push({
+            newStart: currentNewLine,
+            newCount: 1,
+            type: 'added',
+            lineNum: currentNewLine
+          });
+          currentNewLine++;
+        } else if (hunkLine.startsWith('-') && !hunkLine.startsWith('---')) {
+          changes.push({
+            type: 'deleted',
+            content: hunkLine.substring(1).trim()
+          });
+        } else if (!hunkLine.startsWith('@') && hunkLine.trim()) {
+          currentNewLine++;
+        }
+      }
+    }
+
+    return changes;
+  }
+
+  /**
+   * 提取 hunk 的内容行
+   */
+  _extractHunkContent(diffPatch, hunk) {
+    const lines = diffPatch.split('\n');
+    const contentLines = [];
+    let inHunk = false;
+    let lineCount = 0;
+
+    for (const line of lines) {
+      if (line.match(/^@@ -\d+/)) {
+        const match = line.match(/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+        if (match && parseInt(match[3]) === hunk.newStart) {
+          inHunk = true;
+          lineCount = 0;
+          continue;
+        }
+        if (inHunk) break;
+      }
+      if (inHunk) {
+        contentLines.push(line);
+        lineCount++;
+        // hunk 内容通常以非 +/- 行结束或下一个 @@ 开始
+        if (lineCount > hunk.newCount + 10) break; // 安全限制
+      }
+    }
+
+    return contentLines;
+  }
+
+  /**
+   * 判断行号的变更类型
+   */
+  _getLineChangeType(lineNum, changeRanges) {
+    for (const range of changeRanges) {
+      if (range.type === 'added' && range.lineNum === lineNum) return 'added';
+      if (range.type === 'mixed' && lineNum >= range.newStart && lineNum <= range.newEnd) return 'modified';
+    }
+    return 'unchanged';
   }
 }
 

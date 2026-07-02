@@ -245,6 +245,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getQAReviewerSettings: () => ipcRenderer.invoke('qa-reviewer:get-settings'),
   getProjectFiles: () => ipcRenderer.invoke('qa-reviewer:get-project-files'),
   searchFilesByPageName: (params) => ipcRenderer.invoke('qa-reviewer:search-files-by-page-name', params),
+  // Git 增量审查相关
+  getGitChangedFiles: (params) => ipcRenderer.invoke('qa-reviewer:get-git-changed-files', params),
+  getGitBranches: (projectPath) => ipcRenderer.invoke('qa-reviewer:get-git-branches', projectPath),
   onQAReviewProgress: (callback) => {
     const handler = (event, data) => callback(data);
     ipcRenderer.on('qa-reviewer:progress', handler);
