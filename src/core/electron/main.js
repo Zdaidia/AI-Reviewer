@@ -3978,6 +3978,7 @@ ipcMain.handle('req-analyzer:delete-requirement', async (event, requirementName)
 // 获取保存路径预览
 ipcMain.handle('req-analyzer:get-save-path-preview', async (event, moduleName) => {
   try {
+    await ensureReqAnalyzerReady(); // 确保项目路径已同步
     const { DATA_DIR } = require('../config/data-dir');
     const pathMod = require('path');
     const projectPath = reqAnalyzer?.projectPath || '';
@@ -6408,6 +6409,8 @@ ipcMain.handle('qa-reviewer:create-plan', async (event, params) => {
  * 执行审查
  */
 ipcMain.handle('qa-reviewer:execute', async (event, params) => {
+  // 重置取消标志（每次新审查前必须重置，否则上次取消的状态会残留）
+  global.qaReviewerCancelled = false;
   debugLog(`[qa-reviewer:execute] 被调用`);
   debugLog(`[qa-reviewer:execute] llmRouter: ${!!global.llmRouter}, codeScanner: ${!!codeScanner}`);
   debugLog(`[qa-reviewer:execute] currentProjectPath: ${global.currentProjectPath}`);

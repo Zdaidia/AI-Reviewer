@@ -665,6 +665,27 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
       if (result.questionList) {
         setQuestionList(result.questionList);
         showToast(`分析完成: 发现 ${result.questionList.length} 个问题`, 'info');
+
+        // 自动写入 Google Sheets（如果 URL 已配置）
+        if (result.questionList.length > 0 && questionSheetUrl.trim()) {
+          try {
+            const writeResult = await electronAPI.reqAnalyzerWriteQuestionList(
+              questionSheetUrl, result.questionList, requirementName, requirementLanguage
+            );
+            if (writeResult.success) {
+              setQuestionsWritten(true);
+              showToast(`问题清单已自动写入 Sheet: ${writeResult.sheetName}，共 ${writeResult.rowsWritten} 个问题`, 'success', 4000);
+            } else {
+              showToast(`自动写入 Sheets 失败: ${writeResult.error}，可手动点击写入按钮`, 'warning', 4000);
+            }
+          } catch (writeErr) {
+            showToast(`自动写入 Sheets 失败: ${writeErr.message}`, 'warning', 4000);
+          }
+        } else if (result.questionList.length > 0 && !questionSheetUrl.trim()) {
+          showToast('问题清单已生成，可在设置中配置问题 Sheet URL 以自动写入', 'info', 4000);
+        }
+
+        // 跳转到完善 tab
         if (autoNextStep && result.questionList.length > 0) setActiveTab('refine');
       } else if (result.error) {
         showToast(`分析失败: ${result.error}`, 'error');
@@ -836,7 +857,28 @@ function ReqAnalyzerModal({ isOpen, onClose, projectPath }) {
           hasNewIssues: true,
           message: result.message || `需求中有 ${result.questionList.length} 个不清晰之处`,
         });
-        showToast(result.message || '需要人工回复问题后才能完善需求', 'info');
+
+        // 自动写入 Google Sheets（如果 URL 已配置）
+        if (questionSheetUrl.trim()) {
+          try {
+            const writeResult = await electronAPI.reqAnalyzerWriteQuestionList(
+              questionSheetUrl, result.questionList, requirementName, requirementLanguage
+            );
+            if (writeResult.success) {
+              setQuestionsWritten(true);
+              showToast(`问题清单已自动写入 Sheet: ${writeResult.sheetName}，请在 Sheets 中填写回复后再来继续`, 'success', 5000);
+            } else {
+              showToast(`自动写入 Sheets 失败: ${writeResult.error}`, 'warning', 4000);
+            }
+          } catch (writeErr) {
+            showToast(`自动写入 Sheets 失败: ${writeErr.message}`, 'warning', 4000);
+          }
+        } else {
+          showToast(result.message || '需要人工回复问题后才能完善需求', 'info');
+        }
+
+        // 跳转到完善 tab
+        if (autoNextStep) setActiveTab('refine');
       } else {
         showToast('执行完成但未生成有效结果', 'warning');
       }

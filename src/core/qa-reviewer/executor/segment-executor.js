@@ -7,6 +7,7 @@
 const { SegmentStatus } = require('../strategies/segment-strategy');
 const CodeSlicer = require('../utils/code-slicer');
 const { QAModelConfig } = require('../config/model-config');
+const { parseJsTsI18n } = require('../utils/i18n-utils');
 
 class SegmentExecutor {
   constructor(options = {}) {
@@ -5121,6 +5122,10 @@ ${reviewTasks.maintainability ? `✅ **8. 可维护性（maintainability）**
         case '.yaml':
         case '.yml':
           return this.parseYamlI18n(content);
+        case '.js':
+        case '.ts':
+          // Vue/React 项目 JS/TS 语言包格式（export const m = { ... }）
+          return parseJsTsI18n(content);
         default:
           try { return this.parseJsonI18n(content); } catch { return this.parseDartI18n(content); }
       }

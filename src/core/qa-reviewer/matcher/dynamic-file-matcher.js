@@ -229,32 +229,44 @@ class DynamicFileMatcher {
     // 步骤2: 优先从菜单配置获取精确的路由→文件映射
     if (this.menuRouteMap && this.menuRouteMap.size > 0) {
       for (const i18nKey of uniqueKeys) {
-        const routeName = this.menuRouteMap.get(i18nKey);
-        if (routeName) {
-          trace.push(`i18n: 从菜单配置找到 key "${i18nKey}" → route "${routeName}"`);
+        const routeNameOrPath = this.menuRouteMap.get(i18nKey);
+        if (routeNameOrPath) {
+          trace.push(`i18n: 从菜单配置找到 key "${i18nKey}" → route "${routeNameOrPath}"`);
 
-          // 从 routeMap 中查找该路由名对应的路由信息
+          // 从 routeMap 中查找该路由对应的路由信息
+          // 优先按 routeName 匹配，回退按 routePath 匹配（菜单可能只存了路径basename）
+          let foundRouteInfo = null;
           for (const [routePath, routeInfo] of this.routeMap) {
-            if (routeInfo.routeName === routeName) {
-              const moduleFiles = new Map();
-              // 页面文件
-              if (routeInfo.pageFilePath) moduleFiles.set(routeInfo.pageFilePath, 'view');
-              // Binding 文件
-              if (routeInfo.bindingFilePath) moduleFiles.set(routeInfo.bindingFilePath, 'binding');
-              // Controller 文件
-              for (const cp of routeInfo.controllerPaths) moduleFiles.set(cp, 'controller');
-              // Provider/API 文件
-              for (const pp of routeInfo.providerPaths) moduleFiles.set(pp, 'service');
+            if (routeInfo.routeName === routeNameOrPath) {
+              foundRouteInfo = routeInfo;
+              break;
+            }
+            // 回退：routeNameOrPath 可能是 path 的 basename，检查路径匹配
+            if (routePath === routeNameOrPath || routePath.endsWith('/' + routeNameOrPath)) {
+              foundRouteInfo = routeInfo;
+              break;
+            }
+          }
 
-              if (moduleFiles.size > 0) {
-                // 通过 import 扩展页面和 controller 的依赖
-                const expanded = this.expandViaRouteAndImports(moduleFiles);
-                trace.push(`i18n: 菜单→路由→获取到${moduleFiles.size}个核心文件，扩展后${expanded.size}个文件`);
-                return {
-                  files: Array.from(expanded.entries()).map(([p, t]) => ({ path: p, name: path.basename(p), type: t })),
-                  trace,
-                };
-              }
+          if (foundRouteInfo) {
+            const moduleFiles = new Map();
+            // 页面文件
+            if (foundRouteInfo.pageFilePath) moduleFiles.set(foundRouteInfo.pageFilePath, 'view');
+            // Binding 文件
+            if (foundRouteInfo.bindingFilePath) moduleFiles.set(foundRouteInfo.bindingFilePath, 'binding');
+            // Controller 文件
+            for (const cp of foundRouteInfo.controllerPaths) moduleFiles.set(cp, 'controller');
+            // Provider/API 文件
+            for (const pp of foundRouteInfo.providerPaths) moduleFiles.set(pp, 'service');
+
+            if (moduleFiles.size > 0) {
+              // 通过 import 扩展页面和 controller 的依赖
+              const expanded = this.expandViaRouteAndImports(moduleFiles);
+              trace.push(`i18n: 菜单→路由→获取到${moduleFiles.size}个核心文件，扩展后${expanded.size}个文件`);
+              return {
+                files: Array.from(expanded.entries()).map(([p, t]) => ({ path: p, name: path.basename(p), type: t })),
+                trace,
+              };
             }
           }
         }
@@ -438,6 +450,21 @@ class DynamicFileMatcher {
       return { files: [], trace };
     }
 
+    // 通用泛词过滤：前端项目中这些词几乎出现在所有文件名中，不能作为独立匹配依据
+    const GENERIC_WORDS = [
+      'list', 'view', 'page', 'data', 'info', 'item', 'detail', 'search',
+      'add', 'edit', 'create', 'delete', 'update', 'form', 'index', 'home',
+      'main', 'setting', 'config', 'log', 'table', 'modal', 'dialog',
+      'menu', 'nav', 'header', 'footer', 'layout', 'component', 'wrapper',
+      'container', 'card', 'panel', 'tab', 'btn', 'input', 'select',
+    ];
+    const genericSet = new Set(GENERIC_WORDS);
+
+    // 分离泛词和精确词
+    const preciseKeywords = englishKeywords.filter(kw => !genericSet.has(kw.toLowerCase()));
+    const genericKeywords = englishKeywords.filter(kw => genericSet.has(kw.toLowerCase()));
+    trace.push(`codegraph: 精确关键词: ${preciseKeywords.join(', ') || '(无)'}, 泛词: ${genericKeywords.join(', ') || '(无)'}`);
+
     const matchedFiles = new Map();
     for (const node of this.codeGraph.nodes) {
       const filePath = node.filePath || node.file || '';
@@ -447,18 +474,40 @@ class DynamicFileMatcher {
       const normalPath = filePath.replace(/\\/g, '/').toLowerCase();
       const nodeName = (node.name || '').toLowerCase();
 
-      let isMatch = false;
+      let matchedPreciseCount = 0;
+      let matchedGenericCount = 0;
+
       for (const kw of englishKeywords) {
         const kwLower = kw.toLowerCase();
-        if (fileName.includes(kwLower) ||
-            normalPath.includes(`/${kwLower}/`) ||
-            fileName.startsWith(`${kwLower}.`) ||
+        const isGeneric = genericSet.has(kwLower);
+
+        // 精确匹配：文件名前缀匹配、路径中包含目录名、节点名包含
+        if (fileName.startsWith(`${kwLower}.`) ||
             fileName.startsWith(`${kwLower}_`) ||
             fileName.startsWith(`${kwLower}-`) ||
+            normalPath.includes(`/${kwLower}/`) ||
             nodeName.includes(kwLower)) {
-          isMatch = true;
-          break;
+          if (isGeneric) matchedGenericCount++;
+          else matchedPreciseCount++;
+          continue;
         }
+
+        // 泛词只在前缀匹配或目录名匹配时才算命中（不使用 includes）
+        if (isGeneric) continue;
+
+        // 精确词可以使用 includes（精确词足够特殊）
+        if (fileName.includes(kwLower) || nodeName.includes(kwLower)) {
+          matchedPreciseCount++;
+        }
+      }
+
+      // 匹配条件：有精确词命中时，至少匹配1个精确词
+      // 只有泛词时（无精确词），需要至少2个泛词组合匹配
+      let isMatch = false;
+      if (preciseKeywords.length > 0) {
+        isMatch = matchedPreciseCount >= 1;
+      } else {
+        isMatch = matchedGenericCount >= 2;
       }
 
       if (isMatch) {
@@ -472,7 +521,7 @@ class DynamicFileMatcher {
     trace.push(`codegraph: 直接匹配${matchedFiles.size}个文件`);
 
     if (matchedFiles.size === 0) {
-      // 模糊匹配：关键词前缀
+      // 模糊匹配：关键词前缀（仅对精确关键词）
       for (const node of this.codeGraph.nodes) {
         const filePath = node.filePath || node.file || '';
         if (!filePath) continue;
@@ -480,7 +529,7 @@ class DynamicFileMatcher {
         if (!['view', 'controller', 'component'].includes(fileType)) continue;
 
         const fileName = path.basename(filePath).toLowerCase();
-        for (const kw of englishKeywords) {
+        for (const kw of preciseKeywords) {
           if (kw.length >= 3) {
             const partial = kw.substring(0, Math.min(6, kw.length));
             if (fileName.includes(partial)) {
@@ -635,9 +684,37 @@ class DynamicFileMatcher {
    * 查找使用 i18n key 的源文件
    */
   findFilesUsingI18nKey(i18nKey) {
-    // 优先从缓存查找
-    if (this.i18nKeyToFilesCache && this.i18nKeyToFilesCache.has(i18nKey)) {
-      return this.i18nKeyToFilesCache.get(i18nKey);
+    // 优先从缓存查找（支持带顶层对象名前缀和不带前缀两种格式）
+    if (this.i18nKeyToFilesCache) {
+      // 1. 直接匹配（如 "device_alert.tx_header_camera"）
+      if (this.i18nKeyToFilesCache.has(i18nKey)) {
+        return this.i18nKeyToFilesCache.get(i18nKey);
+      }
+      // 2. 带前缀匹配（源码中可能是 "m.device_alert.tx_header_camera"，缓存中可能只存了完整形式）
+      for (const [cachedKey, files] of this.i18nKeyToFilesCache) {
+        // cachedKey 是源码中的完整 key（如 "m.device_alert.tx_header_camera"）
+        // i18nKey 是扁平化后的 key（如 "device_alert.tx_header_camera"）
+        if (cachedKey === i18nKey || cachedKey.endsWith('.' + i18nKey)) {
+          return files;
+        }
+      }
+      // 3. Namespace 前缀匹配：叶子 key 的父级 namespace 也能匹配
+      // 如 i18nKey = "m.fms.driver_management.tx_cancel"
+      // 也查找 "m.fms.driver_management" (namespace key) 对应的文件
+      // 这样当源码使用 $t("m.fms.driver_management") 只传入 namespace key 时也能找到
+      const dotParts = i18nKey.split('.');
+      for (let i = dotParts.length - 1; i >= 2; i--) {
+        const nsKey = dotParts.slice(0, i).join('.');
+        if (this.i18nKeyToFilesCache.has(nsKey)) {
+          return this.i18nKeyToFilesCache.get(nsKey);
+        }
+        // 也尝试 endsWith 回退匹配（namespace key 可能带额外前缀）
+        for (const [cachedKey, files] of this.i18nKeyToFilesCache) {
+          if (cachedKey.endsWith('.' + nsKey)) {
+            return files;
+          }
+        }
+      }
     }
 
     // 实时 grep 搜索
@@ -670,17 +747,40 @@ class DynamicFileMatcher {
    */
   getI18nUsagePattern(i18nKey) {
     const escaped = i18nKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Vue 项目中 i18n key 可能带顶层对象名前缀（如 "m.device_alert.tx_header_camera"）
+    // 而扁平化后的 key 是 "device_alert.tx_header_camera"，所以正则需要允许前缀
+    const escapedWithOptionalPrefix = `(?:[a-zA-Z_]+\\.)*${escaped}`;
 
     switch (this.projectType) {
       case 'flutter':
         // 'key'.tr 或 key.tr
         return new RegExp(`['"]${escaped}['"]\\.tr|${escaped}\\.tr`);
       case 'vue':
-        // $t('key') 或 i18n.t('key') 或 t('key')
-        return new RegExp(`\\$t\\(['"]${escaped}['"]\\)|i18n\\.t\\(['"]${escaped}['"]\\)|t\\(['"]${escaped}['"]\\)`);
+        // 基础模式：$t('key') / $t('prefix.key') / i18n.t('key') / this.$t('key') / t('key')
+        const callPatterns = `\\$t|this\\.\\$t|i18n\\.t|t`;
+        const fullPattern = `${callPatterns}\\(['"]${escapedWithOptionalPrefix}['"]\\)`;
+
+        // Namespace 前缀匹配：也搜索叶子 key 的各级 namespace 前缀
+        // 如搜索 "m.fms.driver_management.tx_cancel" 时，也能匹配 $t("m.fms.driver_management")
+        const nsPatterns = [];
+        if (escaped.includes('.')) {
+          const parts = i18nKey.split('.');
+          // 从最短2级 namespace 到完整 key 的各级前缀
+          for (let i = 2; i <= parts.length; i++) {
+            const nsKey = parts.slice(0, i).join('.');
+            const nsEscaped = nsKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const nsEscapedWithPrefix = `(?:[a-zA-Z_]+\\.)*${nsEscaped}`;
+            nsPatterns.push(`${callPatterns}\\(['"]${nsEscapedWithPrefix}['"]\\)`);
+          }
+        }
+
+        const allPatterns = nsPatterns.length > 0
+          ? [fullPattern, ...nsPatterns].join('|')
+          : fullPattern;
+        return new RegExp(allPatterns);
       case 'react':
         // t('key')
-        return new RegExp(`t\\(['"]${escaped}['"]\\)`);
+        return new RegExp(`t\\(['"]${escapedWithOptionalPrefix}['"]\\)`);
       case 'angular':
         // 'key' | translate 或 i18n="key"
         return new RegExp(`['"]${escaped}['"]\\s*\\|\\s*translate|i18n="${escaped}"`);
@@ -1015,16 +1115,62 @@ class DynamicFileMatcher {
 
   extractUsedI18nKeysFromContent(content) {
     const usedKeys = [];
+    let m; // 所有 case 共用的正则匹配变量
 
     switch (this.projectType) {
       case 'flutter':
         const flutterPattern = /['"]([a-zA-Z0-9_.]+)['"]\.tr/g;
-        let m;
         while ((m = flutterPattern.exec(content)) !== null) usedKeys.push(m[1]);
         break;
       case 'vue':
+        // 第一步：提取 $t() / i18n.t() / t() 参数中的 key
         const vuePattern = /\$t\(['"]([a-zA-Z0-9_.]+)['"]\)|i18n\.t\(['"]([a-zA-Z0-9_.]+)['"]\)|t\(['"]([a-zA-Z0-9_.]+)['"]\)/g;
         while ((m = vuePattern.exec(content)) !== null) usedKeys.push(m[1] || m[2] || m[3]);
+
+        // 第二步：识别 namespace + 属性访问模式
+        // 如 this.cur_lang = this.$t("m.fms.driver_management") 然后 this.cur_lang_form.tx_cancel
+        // 或 this.cur_lang_form = this.$t("m.fms.driver_management") 然后 this.cur_lang_form.tx_cancel
+        // 匹配赋值语句：this.xxx = this.$t(...) 或 const xxx = this.$t(...)
+        const nsAssignPattern = /(?:this\.|const\s+|let\s+|var\s+)([a-zA-Z0-9_]+)\s*=\s*(?:this\.)?(?:\$t|i18n\.t|t)\(['"]([a-zA-Z0-9_.]+)['"]\)/g;
+        const nsVarMap = new Map(); // 变量名 → namespace key
+        let nsMatch;
+        while ((nsMatch = nsAssignPattern.exec(content)) !== null) {
+          nsVarMap.set(nsMatch[1], nsMatch[2]);
+          // 如果变量名有 _form 后缀变体（如 cur_lang → cur_lang_form），也关联
+          // 因为代码中经常先赋值 cur_lang = $t("xxx")，再用 cur_lang_form.xxx 读取
+          const varName = nsMatch[1];
+          // 注册常见的变体：xxx → xxx_form, xxx → xxx_labels 等
+          const variantPattern = new RegExp(`(?:this\\.)?${varName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(_form|_labels|_text|_msg|_info|_data|_items|_list|_options|_dict|_map)`, 'g');
+          let variantMatch;
+          while ((variantMatch = variantPattern.exec(content)) !== null) {
+            const variantName = variantMatch[1];
+            // 确认变体名不在已有的 nsVarMap 中（避免覆盖直接赋值）
+            if (!nsVarMap.has(variantName)) {
+              nsVarMap.set(variantName, nsMatch[2]);
+            }
+          }
+        }
+
+        // 匹配属性访问：this.varName.subKey 或 varName.subKey
+        // 将属性访问展开为完整 i18n key（namespace key + 属性名）
+        if (nsVarMap.size > 0) {
+          const varNames = Array.from(nsVarMap.keys());
+          const varNamesPattern = varNames.map(v => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+          const propAccessPattern = new RegExp(
+            `(?:this\\.)?(?:${varNamesPattern})\\.([a-zA-Z0-9_]+(?:\\.[a-zA-Z0-9_]+){0,2})`, 'g'
+          );
+          let propMatch;
+          while ((propMatch = propAccessPattern.exec(content)) !== null) {
+            // 提取变量名（可能含 this. 前缀，需要清理）
+            const rawVarName = propMatch[0].startsWith('this.')
+              ? propMatch[0].slice(5).split('.')[0]
+              : propMatch[0].split('.')[0];
+            const nsKey = nsVarMap.get(rawVarName);
+            if (nsKey) {
+              usedKeys.push(`${nsKey}.${propMatch[1]}`);
+            }
+          }
+        }
         break;
       case 'react':
         const reactPattern = /t\(['"]([a-zA-Z0-9_.]+)['"]\)/g;
@@ -1145,27 +1291,44 @@ class DynamicFileMatcher {
    * 格式: { title: $t('key'), path: '/xxx', name: 'xxx' }
    */
   parseVueReactMenuConfig(content) {
-    // Vue: title: i18n.t('key') 或 $t('key')
-    const vuePattern = /title\s*:\s*(?:i18n\.t|this\.\$t|\$t|t)\(['"]([^'"]+)['"]\)[\s\S]*?(?:path\s*:\s*['"]([^'"]+)['"]|name\s*:\s*['"]([^'"]+)['"])/g;
-    let match;
-    while ((match = vuePattern.exec(content)) !== null) {
-      const i18nKey = match[1];
-      const routePath = match[2] || match[3] || '';
-      if (routePath) {
-        // 路由名从 path 或 name 提取
-        const routeName = path.basename(routePath.replace(/\\/g, '/'));
-        this.menuRouteMap.set(i18nKey, routeName);
-      }
+    // Vue/React 菜单配置支持多种写法：
+    // 1. { title: $t('key'), path: '/xxx', name: 'xxx' }
+    // 2. { meta: { title: $t('key') }, path: '/xxx', name: 'xxx' } — Vue Router meta.title 最常见
+    // 3. { label: $t('key'), path: '/xxx' } — Element UI 等菜单
+    // 4. { text: $t('key'), path: '/xxx' } — Ant Design 等菜单
+    // i18n 调用形式: i18n.t(), this.$t(), $t(), t()
+
+    const i18nCallPattern = `(?:i18n\\.t|this\\.\\$t|\\$t|t)\\(['"]([^'"]+)['"]\\)`;
+
+    // 支持的字段名：title, label, text, meta.title
+    const fieldNames = ['title', 'label', 'text'];
+    const patterns = [];
+
+    // 直接字段匹配：{ title: $t('key'), ... path/name }
+    for (const field of fieldNames) {
+      patterns.push(new RegExp(
+        `${field}\\s*:\\s*${i18nCallPattern}[\\s\\S]*?(?:path\\s*:\\s*['"]([^'"]+)['"]|name\\s*:\\s*['"]([^'"]+)['"])`,
+        'g'
+      ));
     }
 
-    // React: 类似格式
-    const reactPattern = /label\s*:\s*t\(['"]([^'"]+)['"]\)[\s\S]*?(?:path\s*:\s*['"]([^'"]+)['"]|name\s*:\s*['"]([^'"]+)['"])/g;
-    while ((match = reactPattern.exec(content)) !== null) {
-      const i18nKey = match[1];
-      const routePath = match[2] || match[3] || '';
-      if (routePath) {
-        const routeName = path.basename(routePath.replace(/\\/g, '/'));
-        this.menuRouteMap.set(i18nKey, routeName);
+    // meta.title 匹配：{ meta: { title: $t('key') }, ... path/name }
+    patterns.push(new RegExp(
+      `meta\\s*:\\s*\\{[\\s\\S]*?title\\s*:\\s*${i18nCallPattern}[\\s\\S]*?\\}[\\s\\S]*?(?:path\\s*:\\s*['"]([^'"]+)['"]|name\\s*:\\s*['"]([^'"]+)['"])`,
+      'g'
+    ));
+
+    for (const pattern of patterns) {
+      let match;
+      while ((match = pattern.exec(content)) !== null) {
+        const i18nKey = match[1];
+        const routePathValue = match[2] || '';
+        const routeNameValue = match[3] || '';
+        if (routePathValue || routeNameValue) {
+          // routeName 优先使用显式 name 字段，回退从 path 推断
+          const routeName = routeNameValue || path.basename(routePathValue.replace(/\\/g, '/'));
+          this.menuRouteMap.set(i18nKey, routeName);
+        }
       }
     }
   }
@@ -1320,29 +1483,161 @@ class DynamicFileMatcher {
   }
 
   parseVueRoutes(content, routeFilePath) {
-    // Vue Router: { path: '/xxx', component: () => import('@/views/Xxx.vue'), name: 'xxx' }
-    const routePattern = /path\s*:\s*['"]([^'"]+)['"][\s\S]*?component\s*:\s*\(\)\s*=>\s*import\(['"]([^'"]+)['"]\)[\s\S]*?name\s*:\s*['"]([^'"]+)['"]/g;
+    // Vue Router 支持多种写法：
+    // 1. { path: '/xxx', component: () => import('@/views/Xxx.vue'), name: 'xxx' }
+    // 2. { path: '/xxx', name: 'xxx', component: () => import('@/views/Xxx.vue') } — name 在 component 前
+    // 3. { path: '/xxx', component: () => import('@/views/Xxx.vue') } — 无 name 字段
+    // 4. { path: '/xxx', component: XxxView } — 直接引用变量
+
+    // 策略1：解析带 name + 懒加载 import 的路由（name 在 component 前或后均可）
+    const lazyPattern1 = /name\s*:\s*['"]([^'"]+)['"][\s\S]*?path\s*:\s*['"]([^'"]+)['"][\s\S]*?component\s*:\s*\(\)\s*=>\s*import\(['"]([^'"]+)['"]\)/g;
+    const lazyPattern2 = /path\s*:\s*['"]([^'"]+)['"][\s\S]*?name\s*:\s*['"]([^'"]+)['"][\s\S]*?component\s*:\s*\(\)\s*=>\s*import\(['"]([^'"]+)['"]\)/g;
+    const lazyPattern3 = /path\s*:\s*['"]([^'"]+)['"][\s\S]*?component\s*:\s*\(\)\s*=>\s*import\(['"]([^'"]+)['"]\)/g;
+
+    // 策略2：解析直接引用变量的路由 { path, name, component: VarName }
+    const directPattern1 = /name\s*:\s*['"]([^'"]+)['"][\s\S]*?path\s*:\s*['"]([^'"]+)['"][\s\S]*?component\s*:\s*([A-Za-z_]\w*)/g;
+    const directPattern2 = /path\s*:\s*['"]([^'"]+)['"][\s\S]*?name\s*:\s*['"]([^'"]+)['"][\s\S]*?component\s*:\s*([A-Za-z_]\w*)/g;
+
+    const srcDir = path.join(this.projectPath, 'src');
+
+    // 解析懒加载路由（name在前）
     let match;
-    while ((match = routePattern.exec(content)) !== null) {
+    while ((match = lazyPattern1.exec(content)) !== null) {
+      const routeName = match[1];
+      const routePath = match[2];
+      const componentImport = match[3];
+      this.addVueRouteEntry(routePath, routeName, componentImport, srcDir);
+    }
+
+    // 解析懒加载路由（path在前，name在中）
+    while ((match = lazyPattern2.exec(content)) !== null) {
+      const routePath = match[1];
+      const routeName = match[2];
+      const componentImport = match[3];
+      // 防止和 lazyPattern1 重复（如果同一条路由被两个模式匹配）
+      if (!this.routeMap.has(routePath)) {
+        this.addVueRouteEntry(routePath, routeName, componentImport, srcDir);
+      }
+    }
+
+    // 解析懒加载路由（无 name 字段）——从 component import 路径推断 routeName
+    while ((match = lazyPattern3.exec(content)) !== null) {
       const routePath = match[1];
       const componentImport = match[2];
-      const routeName = match[3];
-
-      // 解析 component import 路径
-      const srcDir = path.join(this.projectPath, 'src');
-      const componentPath = path.join(srcDir, componentImport.replace('@/', '').replace(/\\/g, '/'));
-      const resolvedPath = fs.existsSync(componentPath) ? componentPath : '';
-
-      this.routeMap.set(routePath, {
-        routePath,
-        routeName,
-        pageClass: routeName,
-        pageFilePath: resolvedPath,
-        bindingFilePath: '',
-        controllerPaths: [],
-        providerPaths: [],
-      });
+      // 防止和前面的模式重复
+      if (!this.routeMap.has(routePath)) {
+        // 从组件路径推断 name：@/views/UserManagement.vue → UserManagement
+        const inferredName = path.basename(componentImport, path.extname(componentImport));
+        this.addVueRouteEntry(routePath, inferredName, componentImport, srcDir);
+      }
     }
+
+    // 解析直接引用路由（name在前）
+    while ((match = directPattern1.exec(content)) !== null) {
+      const routeName = match[1];
+      const routePath = match[2];
+      const componentVar = match[3];
+      if (!this.routeMap.has(routePath)) {
+        // 通过 classToFilePathCache 查找组件变量对应的文件
+        const componentPath = this.findFileForClassName(componentVar) || '';
+        this.addVueRouteEntryWithFile(routePath, routeName, componentPath);
+      }
+    }
+
+    // 解析直接引用路由（path在前）
+    while ((match = directPattern2.exec(content)) !== null) {
+      const routePath = match[1];
+      const routeName = match[2];
+      const componentVar = match[3];
+      if (!this.routeMap.has(routePath)) {
+        const componentPath = this.findFileForClassName(componentVar) || '';
+        this.addVueRouteEntryWithFile(routePath, routeName, componentPath);
+      }
+    }
+
+    console.log(`[DynamicFileMatcher] Vue路由解析完成，routeMap大小: ${this.routeMap.size}`);
+  }
+
+  /**
+   * 辅助方法：添加 Vue 路由条目到 routeMap
+   * 从 component import 路径解析实际文件路径，并从页面文件推断关联的 store/service/api
+   */
+  addVueRouteEntry(routePath, routeName, componentImport, srcDir) {
+    // 解析 component import 路径
+    const componentPath = path.join(srcDir, componentImport.replace('@/', '').replace(/\\/g, '/'));
+    const resolvedPath = fs.existsSync(componentPath) ? componentPath : '';
+
+    // Vue 没有 binding/controller/provider，但可以从页面文件推断关联的 store/service
+    const controllerPaths = [];
+    const providerPaths = [];
+
+    if (resolvedPath && fs.existsSync(resolvedPath)) {
+      try {
+        const pageContent = fs.readFileSync(resolvedPath, 'utf8');
+        // Vue 页面常见的关联文件模式：
+        // import { useXxxStore } from '@/stores/xxx' → store/service
+        // import { xxxApi } from '@/api/xxx' → service/api
+        // import XxxService from '@/services/xxx' → service
+        const imports = this.parseImportsForDependencies(resolvedPath, pageContent);
+        for (const imp of imports) {
+          const targetFile = this.resolveImportToFilePath(imp, resolvedPath);
+          if (targetFile) {
+            const ft = inferFileType(targetFile, this.projectType);
+            if (ft === 'service' || ft === 'api' || ft === 'state') {
+              providerPaths.push(targetFile);
+            } else if (ft === 'controller' || ft === 'hook' || ft === 'composable') {
+              controllerPaths.push(targetFile);
+            }
+          }
+        }
+      } catch (e) { /* 忽略 */ }
+    }
+
+    this.routeMap.set(routePath, {
+      routePath,
+      routeName,
+      pageClass: routeName,
+      pageFilePath: resolvedPath,
+      bindingFilePath: '',
+      controllerPaths,
+      providerPaths,
+    });
+  }
+
+  /**
+   * 辅助方法：添加 Vue 路由条目（已知文件路径）
+   */
+  addVueRouteEntryWithFile(routePath, routeName, componentPath) {
+    const controllerPaths = [];
+    const providerPaths = [];
+
+    if (componentPath && fs.existsSync(componentPath)) {
+      try {
+        const pageContent = fs.readFileSync(componentPath, 'utf8');
+        const imports = this.parseImportsForDependencies(componentPath, pageContent);
+        for (const imp of imports) {
+          const targetFile = this.resolveImportToFilePath(imp, componentPath);
+          if (targetFile) {
+            const ft = inferFileType(targetFile, this.projectType);
+            if (ft === 'service' || ft === 'api' || ft === 'state') {
+              providerPaths.push(targetFile);
+            } else if (ft === 'controller' || ft === 'hook' || ft === 'composable') {
+              controllerPaths.push(targetFile);
+            }
+          }
+        }
+      } catch (e) { /* 忽略 */ }
+    }
+
+    this.routeMap.set(routePath, {
+      routePath,
+      routeName,
+      pageClass: routeName,
+      pageFilePath: componentPath,
+      bindingFilePath: '',
+      controllerPaths,
+      providerPaths,
+    });
   }
 
   loadTestContext() {

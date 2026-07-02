@@ -47,11 +47,18 @@ class ReqAnalyzer {
    *   如果未设置项目路径，使用默认目录以支持 Google 登录等基础操作
    */
   async ensureInitialized(projectPath) {
-    // 已初始化且有真实项目路径时跳过（不覆盖真实路径为 default-project）
-    if (this.config && this.projectPath && this.projectPath !== 'default-project') return;
     if (!projectPath) {
       projectPath = 'default-project';
     }
+    // 项目路径发生变化时需要重新初始化（切换项目后保存路径应跟随当前项目）
+    const needsReinit = !this.config
+      || !this.projectPath
+      || this.projectPath === 'default-project'
+      || this.projectPath !== projectPath;
+
+    if (!needsReinit) return;
+
+    console.log(`[ReqAnalyzer] 项目路径变化: ${this.projectPath || '(未初始化)'} -> ${projectPath}, 重新初始化`);
     await this.initialize(projectPath);
   }
 
